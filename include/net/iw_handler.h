@@ -130,7 +130,7 @@
  * Functions prototype uses union iwreq_data
  * -----------------------------------------
  * Some would have preferred functions defined this way :
- *	static int mydriver_ioctl_setrate(struct net_device *dev, 
+ *	static int mydriver_ioctl_setrate(struct net_device *dev,
  *					  long rate, int auto)
  * 1) The kernel code doesn't "validate" the content of iwreq_data, and
  * can't do it (different hardware may have different notion of what a
@@ -551,7 +551,8 @@ iwe_stream_add_point(struct iw_request_info *info, char *stream, char *ends,
 		memcpy(stream + lcp_len,
 		       ((char *) &iwe->u) + IW_EV_POINT_OFF,
 		       IW_EV_POINT_PK_LEN - IW_EV_LCP_PK_LEN);
-		memcpy(stream + point_len, extra, iwe->u.data.length);
+		if (iwe->u.data.length && extra)
+				memcpy(stream + point_len, extra, iwe->u.data.length);
 		stream += event_len;
 	}
 	return stream;
