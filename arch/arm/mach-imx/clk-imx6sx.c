@@ -143,6 +143,7 @@ static void __init imx6sx_clocks_init(struct device_node *ccm_node)
 	np = of_find_compatible_node(NULL, NULL, "fsl,imx6sx-anatop");
 	base = of_iomap(np, 0);
 	WARN_ON(!base);
+	of_node_put(np);
 
 	/*                                              type               name             parent_name   base         div_mask */
 	clks[IMX6SX_CLK_PLL1_SYS]       = imx_clk_pllv3(IMX_PLLV3_SYS,     "pll1_sys",      "osc",        base,        0x7f);
@@ -514,6 +515,9 @@ static void __init imx6sx_clocks_init(struct device_node *ccm_node)
 	/* Update gpu clock from default 528M to 720M */
 	clk_set_parent(clks[IMX6SX_CLK_GPU_CORE_SEL], clks[IMX6SX_CLK_PLL3_PFD0]);
 	clk_set_parent(clks[IMX6SX_CLK_GPU_AXI_SEL], clks[IMX6SX_CLK_PLL3_PFD0]);
+
+	clk_set_parent(clks[IMX6SX_CLK_QSPI1_SEL], clks[IMX6SX_CLK_PLL2_BUS]);
+	clk_set_parent(clks[IMX6SX_CLK_QSPI2_SEL], clks[IMX6SX_CLK_PLL2_BUS]);
 
 	/* Set initial power mode */
 	imx6q_set_lpm(WAIT_CLOCKED);

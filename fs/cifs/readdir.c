@@ -370,8 +370,15 @@ static char *nxt_dir_entry(char *old_entry, char *end_of_smb, int level)
 
 		new_entry = old_entry + sizeof(FIND_FILE_STANDARD_INFO) +
 				pfData->FileNameLength;
-	} else
-		new_entry = old_entry + le32_to_cpu(pDirInfo->NextEntryOffset);
+	} else {
+		u32 next_offset = le32_to_cpu(pDirInfo->NextEntryOffset);
+
+		if (old_entry + next_offset < old_entry) {
+			cifs_dbg(VFS, "invalid offset %u\n", next_offset);
+			return NULL;
+		}
+		new_entry = old_entry + next_offset;
+	}
 	cifs_dbg(FYI, "new entry %p old entry %p\n", new_entry, old_entry);
 	/* validate that new_entry is not past end of SMB */
 	if (new_entry >= end_of_smb) {
@@ -592,14 +599,14 @@ find_cifs_entry(const unsigned int xid, struct cifs_tcon *tcon, loff_t pos,
 	     is_dir_changed(file)) || (index_to_find < first_entry_in_buffer)) {
 		/* close and restart search */
 		cifs_dbg(FYI, "search backing up - close and restart search\n");
-		spin_lock(&cifs_file_list_lock);
-		if (!cfile->srch_inf.endOfSearch && !cfile->invalidHandle) {
+		spin_lock(&cfile->file_info_lock);
+		if (server->ops->dir_needs_close(cfile)) {
 			cfile->invalidHandle = true;
-			spin_unlock(&cifs_file_list_lock);
-			if (server->ops->close)
-				server->ops->close(xid, tcon, &cfile->fid);
+			spin_unlock(&cfile->file_info_lock);
+			if (server->ops->close_dir)
+				server->ops->close_dir(xid, tcon, &cfile->fid);
 		} else
-			spin_unlock(&cifs_file_list_lock);
+			spin_unlock(&cfile->file_info_lock);
 		if (cfile->srch_inf.ntwrk_buf_start) {
 			cifs_dbg(FYI, "freeing SMB ff cache buf on search rewind\n");
 			if (cfile->srch_inf.smallBuf)
@@ -849,6 +856,7 @@ int cifs_readdir(struct file *file, struct dir_context *ctx)
 		 * if buggy server returns . and .. late do we want to
 		 * check for that here?
 		 */
+		*tmp_buf = 0;
 		rc = cifs_filldir(current_entry, file, ctx,
 				  tmp_buf, max_len);
 		if (rc) {

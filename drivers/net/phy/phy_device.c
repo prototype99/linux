@@ -543,8 +543,6 @@ int phy_init_hw(struct phy_device *phydev)
 
 	if (phydev->drv->soft_reset)
 		ret = phydev->drv->soft_reset(phydev);
-	else
-		ret = genphy_soft_reset(phydev);
 
 	if (ret < 0)
 		return ret;
@@ -780,9 +778,10 @@ static int genphy_config_advert(struct phy_device *phydev)
 	if (phydev->supported & (SUPPORTED_1000baseT_Half |
 				 SUPPORTED_1000baseT_Full)) {
 		adv |= ethtool_adv_to_mii_ctrl1000_t(advertise);
-		if (adv != oldadv)
-			changed = 1;
 	}
+
+	if (adv != oldadv)
+		changed = 1;
 
 	err = phy_write(phydev, MII_CTRL1000, adv);
 	if (err < 0)
@@ -1073,7 +1072,10 @@ int genphy_soft_reset(struct phy_device *phydev)
 {
 	int ret;
 
-	ret = phy_write(phydev, MII_BMCR, BMCR_RESET);
+	ret = phy_read(phydev, MII_BMCR);
+	if (ret < 0)
+		return ret;
+	ret = phy_write(phydev, MII_BMCR, ret | BMCR_RESET);
 	if (ret < 0)
 		return ret;
 
@@ -1338,7 +1340,7 @@ static struct phy_driver genphy_driver[] = {
 	.phy_id		= 0xffffffff,
 	.phy_id_mask	= 0xffffffff,
 	.name		= "Generic PHY",
-	.soft_reset	= genphy_soft_reset,
+	.soft_reset	= genphy_no_soft_reset,
 	.config_init	= genphy_config_init,
 	.features	= PHY_GBIT_FEATURES | SUPPORTED_MII |
 			  SUPPORTED_AUI | SUPPORTED_FIBRE |

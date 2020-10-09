@@ -25,7 +25,6 @@
  * Software defined PTE bits definition.
  */
 #define PTE_VALID		(_AT(pteval_t, 1) << 0)
-#define PTE_FILE		(_AT(pteval_t, 1) << 2)	/* only when !pte_present() */
 #define PTE_DIRTY		(_AT(pteval_t, 1) << 55)
 #define PTE_SPECIAL		(_AT(pteval_t, 1) << 56)
 #define PTE_WRITE		(_AT(pteval_t, 1) << 57)
@@ -138,6 +137,8 @@ extern struct page *empty_zero_page;
 
 #define pte_valid_user(pte) \
 	((pte_val(pte) & (PTE_VALID | PTE_USER)) == (PTE_VALID | PTE_USER))
+#define pte_valid_not_user(pte) \
+	((pte_val(pte) & (PTE_VALID | PTE_USER)) == PTE_VALID)
 
 static inline pte_t pte_wrprotect(pte_t pte)
 {
@@ -184,6 +185,15 @@ static inline pte_t pte_mkspecial(pte_t pte)
 static inline void set_pte(pte_t *ptep, pte_t pte)
 {
 	*ptep = pte;
+
+	/*
+	 * Only if the new pte is valid and kernel, otherwise TLB maintenance
+	 * or update_mmu_cache() have the necessary barriers.
+	 */
+	if (pte_valid_not_user(pte)) {
+		dsb(ishst);
+		isb();
+	}
 }
 
 extern void __sync_icache_dcache(pte_t pteval, unsigned long addr);
@@ -239,6 +249,7 @@ static inline pmd_t pte_pmd(pte_t pte)
 #define pmd_trans_splitting(pmd)	pte_special(pmd_pte(pmd))
 #endif
 
+#define pmd_present(pmd)	pte_present(pmd_pte(pmd))
 #define pmd_young(pmd)		pte_young(pmd_pte(pmd))
 #define pmd_wrprotect(pmd)	pte_pmd(pte_wrprotect(pmd_pte(pmd)))
 #define pmd_mksplitting(pmd)	pte_pmd(pte_mkspecial(pmd_pte(pmd)))
@@ -246,7 +257,7 @@ static inline pmd_t pte_pmd(pte_t pte)
 #define pmd_mkwrite(pmd)	pte_pmd(pte_mkwrite(pmd_pte(pmd)))
 #define pmd_mkdirty(pmd)	pte_pmd(pte_mkdirty(pmd_pte(pmd)))
 #define pmd_mkyoung(pmd)	pte_pmd(pte_mkyoung(pmd_pte(pmd)))
-#define pmd_mknotpresent(pmd)	(__pmd(pmd_val(pmd) & ~PMD_TYPE_MASK))
+#define pmd_mknotpresent(pmd)	(__pmd(pmd_val(pmd) & ~PMD_SECT_VALID))
 
 #define __HAVE_ARCH_PMD_WRITE
 #define pmd_write(pmd)		pte_write(pmd_pte(pmd))
@@ -283,7 +294,6 @@ extern pgprot_t phys_mem_access_prot(struct file *file, unsigned long pfn,
 				     unsigned long size, pgprot_t vma_prot);
 
 #define pmd_none(pmd)		(!pmd_val(pmd))
-#define pmd_present(pmd)	(pmd_val(pmd))
 
 #define pmd_bad(pmd)		(!(pmd_val(pmd) & 2))
 
@@ -303,6 +313,7 @@ static inline void set_pmd(pmd_t *pmdp, pmd_t pmd)
 {
 	*pmdp = pmd;
 	dsb(ishst);
+	isb();
 }
 
 static inline void pmd_clear(pmd_t *pmdp)
@@ -333,6 +344,7 @@ static inline void set_pud(pud_t *pudp, pud_t pud)
 {
 	*pudp = pud;
 	dsb(ishst);
+	isb();
 }
 
 static inline void pud_clear(pud_t *pudp)
@@ -389,13 +401,12 @@ extern pgd_t idmap_pg_dir[PTRS_PER_PGD];
 /*
  * Encode and decode a swap entry:
  *	bits 0-1:	present (must be zero)
- *	bit  2:		PTE_FILE
- *	bits 3-8:	swap type
- *	bits 9-57:	swap offset
+ *	bits 2-7:	swap type
+ *	bits 8-57:	swap offset
  */
-#define __SWP_TYPE_SHIFT	3
+#define __SWP_TYPE_SHIFT	2
 #define __SWP_TYPE_BITS		6
-#define __SWP_OFFSET_BITS	49
+#define __SWP_OFFSET_BITS	50
 #define __SWP_TYPE_MASK		((1 << __SWP_TYPE_BITS) - 1)
 #define __SWP_OFFSET_SHIFT	(__SWP_TYPE_BITS + __SWP_TYPE_SHIFT)
 #define __SWP_OFFSET_MASK	((1UL << __SWP_OFFSET_BITS) - 1)
@@ -412,18 +423,6 @@ extern pgd_t idmap_pg_dir[PTRS_PER_PGD];
  * PTEs.
  */
 #define MAX_SWAPFILES_CHECK() BUILD_BUG_ON(MAX_SWAPFILES_SHIFT > __SWP_TYPE_BITS)
-
-/*
- * Encode and decode a file entry:
- *	bits 0-1:	present (must be zero)
- *	bit  2:		PTE_FILE
- *	bits 3-57:	file offset / PAGE_SIZE
- */
-#define pte_file(pte)		(pte_val(pte) & PTE_FILE)
-#define pte_to_pgoff(x)		(pte_val(x) >> 3)
-#define pgoff_to_pte(x)		__pte(((x) << 3) | PTE_FILE)
-
-#define PTE_FILE_MAX_BITS	55
 
 extern int kern_addr_valid(unsigned long addr);
 

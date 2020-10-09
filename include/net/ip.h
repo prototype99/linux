@@ -38,11 +38,12 @@ struct inet_skb_parm {
 	struct ip_options	opt;		/* Compiled IP options		*/
 	unsigned char		flags;
 
-#define IPSKB_FORWARDED		1
-#define IPSKB_XFRM_TUNNEL_SIZE	2
-#define IPSKB_XFRM_TRANSFORMED	4
-#define IPSKB_FRAG_COMPLETE	8
-#define IPSKB_REROUTED		16
+#define IPSKB_FORWARDED		BIT(0)
+#define IPSKB_XFRM_TUNNEL_SIZE	BIT(1)
+#define IPSKB_XFRM_TRANSFORMED	BIT(2)
+#define IPSKB_FRAG_COMPLETE	BIT(3)
+#define IPSKB_REROUTED		BIT(4)
+#define IPSKB_DOREDIRECT	BIT(5)
 
 	u16			frag_max_size;
 };
@@ -158,6 +159,7 @@ static inline __u8 get_rtconn_flags(struct ipcm_cookie* ipc, struct sock* sk)
 }
 
 /* datagram.c */
+int __ip4_datagram_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len);
 int ip4_datagram_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len);
 
 void ip4_datagram_release_cb(struct sock *sk);
@@ -179,7 +181,7 @@ static inline __u8 ip_reply_arg_flowi_flags(const struct ip_reply_arg *arg)
 	return (arg->flags & IP_REPLY_ARG_NOSRCCHECK) ? FLOWI_FLAG_ANYSRC : 0;
 }
 
-void ip_send_unicast_reply(struct net *net, struct sk_buff *skb, __be32 daddr,
+void ip_send_unicast_reply(struct sock *sk, struct sk_buff *skb, __be32 daddr,
 			   __be32 saddr, const struct ip_reply_arg *arg,
 			   unsigned int len);
 
@@ -261,12 +263,19 @@ int ip_decrease_ttl(struct iphdr *iph)
 	return --iph->ttl;
 }
 
+static inline int ip_mtu_locked(const struct dst_entry *dst)
+{
+	const struct rtable *rt = (const struct rtable *)dst;
+
+	return rt->rt_mtu_locked || dst_metric_locked(dst, RTAX_MTU);
+}
+
 static inline
 int ip_dont_fragment(struct sock *sk, struct dst_entry *dst)
 {
 	return  inet_sk(sk)->pmtudisc == IP_PMTUDISC_DO ||
 		(inet_sk(sk)->pmtudisc == IP_PMTUDISC_WANT &&
-		 !(dst_metric_locked(dst, RTAX_MTU)));
+		 !ip_mtu_locked(dst));
 }
 
 static inline bool ip_sk_accept_pmtu(const struct sock *sk)
@@ -292,7 +301,7 @@ static inline unsigned int ip_dst_mtu_maybe_forward(const struct dst_entry *dst,
 	struct net *net = dev_net(dst->dev);
 
 	if (net->ipv4.sysctl_ip_fwd_use_pmtu ||
-	    dst_metric_locked(dst, RTAX_MTU) ||
+	    ip_mtu_locked(dst) ||
 	    !forwarding)
 		return dst_mtu(dst);
 
@@ -310,9 +319,10 @@ static inline unsigned int ip_skb_dst_mtu(const struct sk_buff *skb)
 }
 
 u32 ip_idents_reserve(u32 hash, int segs);
-void __ip_select_ident(struct iphdr *iph, int segs);
+void __ip_select_ident(struct net *net, struct iphdr *iph, int segs);
 
-static inline void ip_select_ident_segs(struct sk_buff *skb, struct sock *sk, int segs)
+static inline void ip_select_ident_segs(struct net *net, struct sk_buff *skb,
+					struct sock *sk, int segs)
 {
 	struct iphdr *iph = ip_hdr(skb);
 
@@ -329,13 +339,14 @@ static inline void ip_select_ident_segs(struct sk_buff *skb, struct sock *sk, in
 			iph->id = 0;
 		}
 	} else {
-		__ip_select_ident(iph, segs);
+		__ip_select_ident(net, iph, segs);
 	}
 }
 
-static inline void ip_select_ident(struct sk_buff *skb, struct sock *sk)
+static inline void ip_select_ident(struct net *net, struct sk_buff *skb,
+				   struct sock *sk)
 {
-	ip_select_ident_segs(skb, sk, 1);
+	ip_select_ident_segs(net, skb, sk, 1);
 }
 
 static inline __wsum inet_compute_pseudo(struct sk_buff *skb, int proto)
@@ -424,22 +435,6 @@ static __inline__ void inet_reset_saddr(struct sock *sk)
 
 #endif
 
-static inline int sk_mc_loop(struct sock *sk)
-{
-	if (!sk)
-		return 1;
-	switch (sk->sk_family) {
-	case AF_INET:
-		return inet_sk(sk)->mc_loop;
-#if IS_ENABLED(CONFIG_IPV6)
-	case AF_INET6:
-		return inet6_sk(sk)->mc_loop;
-#endif
-	}
-	WARN_ON(1);
-	return 1;
-}
-
 bool ip_call_ra_chain(struct sk_buff *skb);
 
 /*
@@ -526,5 +521,10 @@ void ip_local_error(struct sock *sk, int err, __be32 daddr, __be16 dport,
 #ifdef CONFIG_PROC_FS
 int ip_misc_proc_init(void);
 #endif
+
+static inline bool inetdev_valid_mtu(unsigned int mtu)
+{
+	return likely(mtu >= 68);
+}
 
 #endif	/* _IP_H */

@@ -41,7 +41,7 @@
 
 #define CONFIGDESC(usb)         (&((usb)->actconfig)->desc)
 #define IFPTR(usb, idx)         ((usb)->actconfig->interface[(idx)])
-#define IFALTS(usb, idx)        (IFPTR((usb), (idx))->altsetting[0])
+#define IFALTS(usb, idx)        (*IFPTR((usb), (idx))->cur_altsetting)
 #define IFDESC(usb, idx)        IFALTS((usb), (idx)).desc
 #define IFEPDESC(usb, idx, ep)  (IFALTS((usb), (idx)).endpoint[(ep)]).desc
 
@@ -365,6 +365,7 @@ fail:
 			usb_free_urb(req->urb);
 		list_del(q->next);
 	}
+	kfree(reqs);
 	return NULL;
 
 }
@@ -441,7 +442,7 @@ static void brcmf_usb_rx_complete(struct urb *urb)
 
 	if (devinfo->bus_pub.state == BRCMFMAC_USB_STATE_UP) {
 		skb_put(skb, urb->actual_length);
-		brcmf_rx_frame(devinfo->dev, skb);
+		brcmf_rx_frame(devinfo->dev, skb, true);
 		brcmf_usb_rx_refill(devinfo, req);
 	} else {
 		brcmu_pkt_buf_free_skb(skb);

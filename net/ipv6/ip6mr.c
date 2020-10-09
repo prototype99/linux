@@ -120,7 +120,7 @@ static void mr6_netlink_event(struct mr6_table *mrt, struct mfc6_cache *mfc,
 			      int cmd);
 static int ip6mr_rtm_dumproute(struct sk_buff *skb,
 			       struct netlink_callback *cb);
-static void mroute_clean_tables(struct mr6_table *mrt);
+static void mroute_clean_tables(struct mr6_table *mrt, bool all);
 static void ipmr_expire_process(unsigned long arg);
 
 #ifdef CONFIG_IPV6_MROUTE_MULTIPLE_TABLES
@@ -336,8 +336,8 @@ static struct mr6_table *ip6mr_new_table(struct net *net, u32 id)
 
 static void ip6mr_free_table(struct mr6_table *mrt)
 {
-	del_timer(&mrt->ipmr_expire_timer);
-	mroute_clean_tables(mrt);
+	del_timer_sync(&mrt->ipmr_expire_timer);
+	mroute_clean_tables(mrt, true);
 	kfree(mrt);
 }
 
@@ -552,7 +552,7 @@ static void ipmr_mfc_seq_stop(struct seq_file *seq, void *v)
 
 	if (it->cache == &mrt->mfc6_unres_queue)
 		spin_unlock_bh(&mfc_unres_lock);
-	else if (it->cache == mrt->mfc6_cache_array)
+	else if (it->cache == &mrt->mfc6_cache_array[it->ct])
 		read_unlock(&mrt_lock);
 }
 
@@ -1076,6 +1076,7 @@ static struct mfc6_cache *ip6mr_cache_alloc(void)
 	struct mfc6_cache *c = kmem_cache_zalloc(mrt_cachep, GFP_KERNEL);
 	if (c == NULL)
 		return NULL;
+	c->mfc_un.res.last_assert = jiffies - MFC_ASSERT_THRESH - 1;
 	c->mfc_un.res.minvif = MAXMIFS;
 	return c;
 }
@@ -1536,7 +1537,7 @@ static int ip6mr_mfc_add(struct net *net, struct mr6_table *mrt,
  *	Close the multicast socket, and clear the vif tables etc
  */
 
-static void mroute_clean_tables(struct mr6_table *mrt)
+static void mroute_clean_tables(struct mr6_table *mrt, bool all)
 {
 	int i;
 	LIST_HEAD(list);
@@ -1546,8 +1547,9 @@ static void mroute_clean_tables(struct mr6_table *mrt)
 	 *	Shut down all active vif entries
 	 */
 	for (i = 0; i < mrt->maxvif; i++) {
-		if (!(mrt->vif6_table[i].flags & VIFF_STATIC))
-			mif6_delete(mrt, i, &list);
+		if (!all && (mrt->vif6_table[i].flags & VIFF_STATIC))
+			continue;
+		mif6_delete(mrt, i, &list);
 	}
 	unregister_netdevice_many(&list);
 
@@ -1556,7 +1558,7 @@ static void mroute_clean_tables(struct mr6_table *mrt)
 	 */
 	for (i = 0; i < MFC6_LINES; i++) {
 		list_for_each_entry_safe(c, next, &mrt->mfc6_cache_array[i], list) {
-			if (c->mfc_flags & MFC_STATIC)
+			if (!all && (c->mfc_flags & MFC_STATIC))
 				continue;
 			write_lock_bh(&mrt_lock);
 			list_del(&c->list);
@@ -1619,7 +1621,7 @@ int ip6mr_sk_done(struct sock *sk)
 						     net->ipv6.devconf_all);
 			write_unlock_bh(&mrt_lock);
 
-			mroute_clean_tables(mrt);
+			mroute_clean_tables(mrt, false);
 			err = 0;
 			break;
 		}
@@ -1660,6 +1662,10 @@ int ip6_mroute_setsockopt(struct sock *sk, int optname, char __user *optval, uns
 	struct net *net = sock_net(sk);
 	struct mr6_table *mrt;
 
+	if (sk->sk_type != SOCK_RAW ||
+	    inet_sk(sk)->inet_num != IPPROTO_ICMPV6)
+		return -EOPNOTSUPP;
+
 	mrt = ip6mr_get_table(net, raw6_sk(sk)->ip6mr_table ? : RT6_TABLE_DFLT);
 	if (mrt == NULL)
 		return -ENOENT;
@@ -1671,9 +1677,6 @@ int ip6_mroute_setsockopt(struct sock *sk, int optname, char __user *optval, uns
 
 	switch (optname) {
 	case MRT6_INIT:
-		if (sk->sk_type != SOCK_RAW ||
-		    inet_sk(sk)->inet_num != IPPROTO_ICMPV6)
-			return -EOPNOTSUPP;
 		if (optlen < sizeof(int))
 			return -EINVAL;
 
@@ -1783,7 +1786,8 @@ int ip6_mroute_setsockopt(struct sock *sk, int optname, char __user *optval, uns
 		ret = 0;
 		if (!ip6mr_new_table(net, v))
 			ret = -ENOMEM;
-		raw6_sk(sk)->ip6mr_table = v;
+		else
+			raw6_sk(sk)->ip6mr_table = v;
 		rtnl_unlock();
 		return ret;
 	}
@@ -1808,6 +1812,10 @@ int ip6_mroute_getsockopt(struct sock *sk, int optname, char __user *optval,
 	int val;
 	struct net *net = sock_net(sk);
 	struct mr6_table *mrt;
+
+	if (sk->sk_type != SOCK_RAW ||
+	    inet_sk(sk)->inet_num != IPPROTO_ICMPV6)
+		return -EOPNOTSUPP;
 
 	mrt = ip6mr_get_table(net, raw6_sk(sk)->ip6mr_table ? : RT6_TABLE_DFLT);
 	if (mrt == NULL)
@@ -1981,10 +1989,10 @@ int ip6mr_compat_ioctl(struct sock *sk, unsigned int cmd, void __user *arg)
 
 static inline int ip6mr_forward2_finish(struct sk_buff *skb)
 {
-	IP6_INC_STATS_BH(dev_net(skb_dst(skb)->dev), ip6_dst_idev(skb_dst(skb)),
-			 IPSTATS_MIB_OUTFORWDATAGRAMS);
-	IP6_ADD_STATS_BH(dev_net(skb_dst(skb)->dev), ip6_dst_idev(skb_dst(skb)),
-			 IPSTATS_MIB_OUTOCTETS, skb->len);
+	IP6_INC_STATS(dev_net(skb_dst(skb)->dev), ip6_dst_idev(skb_dst(skb)),
+		      IPSTATS_MIB_OUTFORWDATAGRAMS);
+	IP6_ADD_STATS(dev_net(skb_dst(skb)->dev), ip6_dst_idev(skb_dst(skb)),
+		      IPSTATS_MIB_OUTOCTETS, skb->len);
 	return dst_output(skb);
 }
 
@@ -2271,8 +2279,8 @@ static int __ip6mr_fill_mroute(struct mr6_table *mrt, struct sk_buff *skb,
 	return 1;
 }
 
-int ip6mr_get_route(struct net *net,
-		    struct sk_buff *skb, struct rtmsg *rtm, int nowait)
+int ip6mr_get_route(struct net *net, struct sk_buff *skb, struct rtmsg *rtm,
+		    int nowait, u32 portid)
 {
 	int err;
 	struct mr6_table *mrt;
@@ -2317,6 +2325,7 @@ int ip6mr_get_route(struct net *net,
 			return -ENOMEM;
 		}
 
+		NETLINK_CB(skb2).portid = portid;
 		skb_reset_transport_header(skb2);
 
 		skb_put(skb2, sizeof(struct ipv6hdr));

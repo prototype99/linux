@@ -31,6 +31,8 @@
 #include <linux/stop_machine.h>
 #include <linux/hugetlb.h>
 #include <linux/memblock.h>
+#include <linux/bootmem.h>
+#include <linux/rmap.h>
 
 #include <asm/tlbflush.h>
 
@@ -519,7 +521,7 @@ EXPORT_SYMBOL_GPL(__add_pages);
 
 #ifdef CONFIG_MEMORY_HOTREMOVE
 /* find the smallest valid pfn in the range [start_pfn, end_pfn) */
-static int find_smallest_section_pfn(int nid, struct zone *zone,
+static unsigned long find_smallest_section_pfn(int nid, struct zone *zone,
 				     unsigned long start_pfn,
 				     unsigned long end_pfn)
 {
@@ -544,7 +546,7 @@ static int find_smallest_section_pfn(int nid, struct zone *zone,
 }
 
 /* find the biggest valid pfn in the range [start_pfn, end_pfn). */
-static int find_biggest_section_pfn(int nid, struct zone *zone,
+static unsigned long find_biggest_section_pfn(int nid, struct zone *zone,
 				    unsigned long start_pfn,
 				    unsigned long end_pfn)
 {
@@ -734,7 +736,7 @@ static int __remove_section(struct zone *zone, struct mem_section *ms)
 		return ret;
 
 	scn_nr = __section_nr(ms);
-	start_pfn = section_nr_to_pfn(scn_nr);
+	start_pfn = section_nr_to_pfn((unsigned long)scn_nr);
 	__remove_zone(zone, start_pfn);
 
 	sparse_remove_one_section(zone, ms);
@@ -779,6 +781,8 @@ int __remove_pages(struct zone *zone, unsigned long phys_start_pfn,
 	sections_to_remove = nr_pages / PAGES_PER_SECTION;
 	for (i = 0; i < sections_to_remove; i++) {
 		unsigned long pfn = phys_start_pfn + i*PAGES_PER_SECTION;
+
+		cond_resched();
 		ret = __remove_section(zone, __pfn_to_section(pfn));
 		if (ret)
 			break;
@@ -1063,6 +1067,16 @@ out:
 }
 #endif /* CONFIG_MEMORY_HOTPLUG_SPARSE */
 
+static void reset_node_present_pages(pg_data_t *pgdat)
+{
+	struct zone *z;
+
+	for (z = pgdat->node_zones; z < pgdat->node_zones + MAX_NR_ZONES; z++)
+		z->present_pages = 0;
+
+	pgdat->node_present_pages = 0;
+}
+
 /* we are OK calling __meminit stuff here - we have CONFIG_MEMORY_HOTPLUG */
 static pg_data_t __ref *hotadd_new_pgdat(int nid, u64 start)
 {
@@ -1078,6 +1092,10 @@ static pg_data_t __ref *hotadd_new_pgdat(int nid, u64 start)
 			return NULL;
 
 		arch_refresh_nodedata(nid, pgdat);
+	} else {
+		/* Reset the nr_zones and classzone_idx to 0 before reuse */
+		pgdat->nr_zones = 0;
+		pgdat->classzone_idx = 0;
 	}
 
 	/* we can use NODE_DATA(nid) from here */
@@ -1092,6 +1110,21 @@ static pg_data_t __ref *hotadd_new_pgdat(int nid, u64 start)
 	mutex_lock(&zonelists_mutex);
 	build_all_zonelists(pgdat, NULL);
 	mutex_unlock(&zonelists_mutex);
+
+	/*
+	 * zone->managed_pages is set to an approximate value in
+	 * free_area_init_core(), which will cause
+	 * /sys/device/system/node/nodeX/meminfo has wrong data.
+	 * So reset it to 0 before any memory is onlined.
+	 */
+	reset_node_managed_pages(pgdat);
+
+	/*
+	 * When memory is hot-added, all the memory is in offline state. So
+	 * clear all zones' present_pages because they will be updated in
+	 * online_pages() and offline_pages().
+	 */
+	reset_node_present_pages(pgdat);
 
 	return pgdat;
 }
@@ -1278,23 +1311,30 @@ int is_mem_section_removable(unsigned long start_pfn, unsigned long nr_pages)
  */
 static int test_pages_in_a_zone(unsigned long start_pfn, unsigned long end_pfn)
 {
-	unsigned long pfn;
+	unsigned long pfn, sec_end_pfn;
 	struct zone *zone = NULL;
 	struct page *page;
 	int i;
-	for (pfn = start_pfn;
+	for (pfn = start_pfn, sec_end_pfn = SECTION_ALIGN_UP(start_pfn);
 	     pfn < end_pfn;
-	     pfn += MAX_ORDER_NR_PAGES) {
-		i = 0;
-		/* This is just a CONFIG_HOLES_IN_ZONE check.*/
-		while ((i < MAX_ORDER_NR_PAGES) && !pfn_valid_within(pfn + i))
-			i++;
-		if (i == MAX_ORDER_NR_PAGES)
+	     pfn = sec_end_pfn + 1, sec_end_pfn += PAGES_PER_SECTION) {
+		/* Make sure the memory section is present first */
+		if (!present_section_nr(pfn_to_section_nr(pfn)))
 			continue;
-		page = pfn_to_page(pfn + i);
-		if (zone && page_zone(page) != zone)
-			return 0;
-		zone = page_zone(page);
+		for (; pfn < sec_end_pfn && pfn < end_pfn;
+		     pfn += MAX_ORDER_NR_PAGES) {
+			i = 0;
+			/* This is just a CONFIG_HOLES_IN_ZONE check.*/
+			while ((i < MAX_ORDER_NR_PAGES) &&
+				!pfn_valid_within(pfn + i))
+				i++;
+			if (i == MAX_ORDER_NR_PAGES)
+				continue;
+			page = pfn_to_page(pfn + i);
+			if (zone && page_zone(page) != zone)
+				return 0;
+			zone = page_zone(page);
+		}
 	}
 	return 1;
 }
@@ -1351,6 +1391,21 @@ do_migrate_range(unsigned long start_pfn, unsigned long end_pfn)
 			}
 			if (isolate_huge_page(page, &source))
 				move_pages -= 1 << compound_order(head);
+			continue;
+		}
+
+		/*
+		 * HWPoison pages have elevated reference counts so the migration would
+		 * fail on them. It also doesn't make any sense to migrate them in the
+		 * first place. Still try to unmap such a page in case it is still mapped
+		 * (e.g. current hwpoison implementation doesn't unmap KSM pages but keep
+		 * the unmap as the catch all safety net).
+		 */
+		if (PageHWPoison(page)) {
+			if (WARN_ON(PageLRU(page)))
+				isolate_lru_page(page);
+			if (page_mapped(page))
+				try_to_unmap(page, TTU_IGNORE_MLOCK | TTU_IGNORE_ACCESS);
 			continue;
 		}
 
@@ -1695,7 +1750,9 @@ repeat:
 	 * dissolve free hugepages in the memory block before doing offlining
 	 * actually in order to make hugetlbfs's object counting consistent.
 	 */
-	dissolve_free_huge_pages(start_pfn, end_pfn);
+	ret = dissolve_free_huge_pages(start_pfn, end_pfn);
+	if (ret)
+		goto failed_removal;
 	/* check again */
 	offlined_pages = check_pages_isolated(start_pfn, end_pfn);
 	if (offlined_pages < 0) {
@@ -1839,34 +1896,6 @@ static int check_cpu_on_node(pg_data_t *pgdat)
 	return 0;
 }
 
-static void unmap_cpu_on_node(pg_data_t *pgdat)
-{
-#ifdef CONFIG_ACPI_NUMA
-	int cpu;
-
-	for_each_possible_cpu(cpu)
-		if (cpu_to_node(cpu) == pgdat->node_id)
-			numa_clear_node(cpu);
-#endif
-}
-
-static int check_and_unmap_cpu_on_node(pg_data_t *pgdat)
-{
-	int ret;
-
-	ret = check_cpu_on_node(pgdat);
-	if (ret)
-		return ret;
-
-	/*
-	 * the node will be offlined when we come here, so we can clear
-	 * the cpu_to_node() now.
-	 */
-
-	unmap_cpu_on_node(pgdat);
-	return 0;
-}
-
 /**
  * try_offline_node
  *
@@ -1900,7 +1929,7 @@ void try_offline_node(int nid)
 		return;
 	}
 
-	if (check_and_unmap_cpu_on_node(pgdat))
+	if (check_cpu_on_node(pgdat))
 		return;
 
 	/*
@@ -1922,18 +1951,11 @@ void try_offline_node(int nid)
 		 * wait_table may be allocated from boot memory,
 		 * here only free if it's allocated by vmalloc.
 		 */
-		if (is_vmalloc_addr(zone->wait_table))
+		if (is_vmalloc_addr(zone->wait_table)) {
 			vfree(zone->wait_table);
+			zone->wait_table = NULL;
+		}
 	}
-
-	/*
-	 * Since there is no way to guarentee the address of pgdat/zone is not
-	 * on stack of any kernel threads or used by other kernel objects
-	 * without reference counting or other symchronizing method, do not
-	 * reset node_data and free pgdat here. Just reset it to 0 and reuse
-	 * the memory when the node is online again.
-	 */
-	memset(pgdat, 0, sizeof(*pgdat));
 }
 EXPORT_SYMBOL(try_offline_node);
 

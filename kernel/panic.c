@@ -13,6 +13,7 @@
 #include <linux/kmsg_dump.h>
 #include <linux/kallsyms.h>
 #include <linux/notifier.h>
+#include <linux/vt_kern.h>
 #include <linux/module.h>
 #include <linux/random.h>
 #include <linux/ftrace.h>
@@ -23,6 +24,7 @@
 #include <linux/sysrq.h>
 #include <linux/init.h>
 #include <linux/nmi.h>
+#include <linux/console.h>
 
 #define PANIC_TIMER_STEP 100
 #define PANIC_BLINK_SPD 18
@@ -59,6 +61,32 @@ void __weak panic_smp_self_stop(void)
 		cpu_relax();
 }
 
+/*
+ * Stop other CPUs in panic.  Architecture dependent code may override this
+ * with more suitable version.  For example, if the architecture supports
+ * crash dump, it should save registers of each stopped CPU and disable
+ * per-CPU features such as virtualization extensions.
+ */
+void __weak crash_smp_send_stop(void)
+{
+	static int cpus_stopped;
+
+	/*
+	 * This function can be called twice in panic path, but obviously
+	 * we execute this only once.
+	 */
+	if (cpus_stopped)
+		return;
+
+	/*
+	 * Note smp_send_stop is the usual smp shutdown function, which
+	 * unfortunately means it may not be hardened to work in a panic
+	 * situation.
+	 */
+	smp_send_stop();
+	cpus_stopped = 1;
+}
+
 /**
  *	panic - halt the system
  *	@fmt: The text string to print
@@ -82,6 +110,7 @@ void panic(const char *fmt, ...)
 	 * after the panic_lock is acquired) from invoking panic again.
 	 */
 	local_irq_disable();
+	preempt_disable_notrace();
 
 	/*
 	 * It's possible to come here directly from a panic-assertion and
@@ -116,15 +145,23 @@ void panic(const char *fmt, ...)
 	 * If we want to run this after calling panic_notifiers, pass
 	 * the "crash_kexec_post_notifiers" option to the kernel.
 	 */
-	if (!crash_kexec_post_notifiers)
+	if (!crash_kexec_post_notifiers) {
 		crash_kexec(NULL);
 
-	/*
-	 * Note smp_send_stop is the usual smp shutdown function, which
-	 * unfortunately means it may not be hardened to work in a panic
-	 * situation.
-	 */
-	smp_send_stop();
+		/*
+		 * Note smp_send_stop is the usual smp shutdown function, which
+		 * unfortunately means it may not be hardened to work in a
+		 * panic situation.
+		 */
+		smp_send_stop();
+	} else {
+		/*
+		 * If we want to do crash dump after notifier calls and
+		 * kmsg_dump, we will need architecture dependent extra
+		 * works in addition to stopping other CPUs.
+		 */
+		crash_smp_send_stop();
+	}
 
 	/*
 	 * Run any panic handlers, including those that might need to
@@ -143,7 +180,21 @@ void panic(const char *fmt, ...)
 	 */
 	crash_kexec(NULL);
 
-	bust_spinlocks(0);
+#ifdef CONFIG_VT
+	unblank_screen();
+#endif
+	console_unblank();
+
+	/*
+	 * We may have ended up stopping the CPU holding the lock (in
+	 * smp_send_stop()) while still having some valuable data in the console
+	 * buffer.  Try to acquire the lock then release it regardless of the
+	 * result.  The release will also print the buffers out.  Locks debug
+	 * should be disabled to avoid reporting bad unlock balance when
+	 * panic() is not being callled from OOPS.
+	 */
+	debug_locks_off();
+	console_flush_on_panic();
 
 	if (!panic_blink)
 		panic_blink = no_blink;

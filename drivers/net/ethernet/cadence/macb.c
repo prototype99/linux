@@ -30,7 +30,6 @@
 #include <linux/of_device.h>
 #include <linux/of_mdio.h>
 #include <linux/of_net.h>
-#include <linux/pinctrl/consumer.h>
 
 #include "macb.h"
 
@@ -630,11 +629,19 @@ static void gem_rx_refill(struct macb *bp)
 
 			if (entry == RX_RING_SIZE - 1)
 				paddr |= MACB_BIT(RX_WRAP);
-			bp->rx_ring[entry].addr = paddr;
 			bp->rx_ring[entry].ctrl = 0;
+			/* Setting addr clears RX_USED and allows reception,
+			 * make sure ctrl is cleared first to avoid a race.
+			 */
+			wmb();
+			bp->rx_ring[entry].addr = paddr;
 
 			/* properly align Ethernet header */
 			skb_reserve(skb, NET_IP_ALIGN);
+		} else {
+			bp->rx_ring[entry].ctrl = 0;
+			wmb();
+			bp->rx_ring[entry].addr &= ~MACB_BIT(RX_USED);
 		}
 	}
 
@@ -684,10 +691,14 @@ static int gem_rx(struct macb *bp, int budget)
 		rmb();
 
 		addr = desc->addr;
-		ctrl = desc->ctrl;
 
 		if (!(addr & MACB_BIT(RX_USED)))
 			break;
+
+		/* Ensure ctrl is at least as up-to-date as rxused */
+		rmb();
+
+		ctrl = desc->ctrl;
 
 		bp->rx_tail++;
 		count++;
@@ -831,10 +842,14 @@ static int macb_rx(struct macb *bp, int budget)
 		rmb();
 
 		addr = desc->addr;
-		ctrl = desc->ctrl;
 
 		if (!(addr & MACB_BIT(RX_USED)))
 			break;
+
+		/* Ensure ctrl is at least as up-to-date as addr */
+		rmb();
+
+		ctrl = desc->ctrl;
 
 		if (ctrl & MACB_BIT(RX_SOF)) {
 			if (first_frag != -1)
@@ -1258,14 +1273,18 @@ static void macb_init_rings(struct macb *bp)
 
 static void macb_reset_hw(struct macb *bp)
 {
+	u32 ctrl = macb_readl(bp, NCR);
+
 	/*
 	 * Disable RX and TX (XXX: Should we halt the transmission
 	 * more gracefully?)
 	 */
-	macb_writel(bp, NCR, 0);
+	ctrl &= ~(MACB_BIT(RE) | MACB_BIT(TE));
 
 	/* Clear the stats registers (XXX: Update stats first?) */
-	macb_writel(bp, NCR, MACB_BIT(CLRSTAT));
+	ctrl |= MACB_BIT(CLRSTAT);
+
+	macb_writel(bp, NCR, ctrl);
 
 	/* Clear all status flags */
 	macb_writel(bp, TSR, -1);
@@ -1401,7 +1420,7 @@ static void macb_init_hw(struct macb *bp)
 	macb_writel(bp, TBQP, bp->tx_ring_dma);
 
 	/* Enable TX and RX */
-	macb_writel(bp, NCR, MACB_BIT(RE) | MACB_BIT(TE) | MACB_BIT(MPE));
+	macb_writel(bp, NCR, macb_readl(bp, NCR) | MACB_BIT(RE) | MACB_BIT(TE));
 
 	/* Enable interrupts */
 	macb_writel(bp, IER, (MACB_RX_INT_FLAGS
@@ -1803,22 +1822,12 @@ static int __init macb_probe(struct platform_device *pdev)
 	struct phy_device *phydev;
 	u32 config;
 	int err = -ENXIO;
-	struct pinctrl *pinctrl;
 	const char *mac;
 
 	regs = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!regs) {
 		dev_err(&pdev->dev, "no mmio resource defined\n");
 		goto err_out;
-	}
-
-	pinctrl = devm_pinctrl_get_select_default(&pdev->dev);
-	if (IS_ERR(pinctrl)) {
-		err = PTR_ERR(pinctrl);
-		if (err == -EPROBE_DEFER)
-			goto err_out;
-
-		dev_warn(&pdev->dev, "No pinctrl provided\n");
 	}
 
 	err = -ENOMEM;

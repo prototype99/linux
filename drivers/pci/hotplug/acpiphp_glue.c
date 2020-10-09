@@ -573,19 +573,15 @@ static void disable_slot(struct acpiphp_slot *slot)
 	slot->flags &= (~SLOT_ENABLED);
 }
 
-static bool acpiphp_no_hotplug(struct acpi_device *adev)
-{
-	return adev && adev->flags.no_hotplug;
-}
-
 static bool slot_no_hotplug(struct acpiphp_slot *slot)
 {
-	struct acpiphp_func *func;
+	struct pci_bus *bus = slot->bus;
+	struct pci_dev *dev;
 
-	list_for_each_entry(func, &slot->funcs, sibling)
-		if (acpiphp_no_hotplug(func_to_acpi_device(func)))
+	list_for_each_entry(dev, &bus->devices, bus_list) {
+		if (PCI_SLOT(dev->devfn) == slot->device && dev->ignore_hotplug)
 			return true;
-
+	}
 	return false;
 }
 
@@ -605,6 +601,7 @@ static unsigned int get_slot_status(struct acpiphp_slot *slot)
 {
 	unsigned long long sta = 0;
 	struct acpiphp_func *func;
+	u32 dvid;
 
 	list_for_each_entry(func, &slot->funcs, sibling) {
 		if (func->flags & FUNC_HAS_STA) {
@@ -615,16 +612,24 @@ static unsigned int get_slot_status(struct acpiphp_slot *slot)
 			if (ACPI_SUCCESS(status) && sta)
 				break;
 		} else {
-			u32 dvid;
-
-			pci_bus_read_config_dword(slot->bus,
-						  PCI_DEVFN(slot->device,
-							    func->function),
-						  PCI_VENDOR_ID, &dvid);
-			if (dvid != 0xffffffff) {
+			if (pci_bus_read_dev_vendor_id(slot->bus,
+					PCI_DEVFN(slot->device, func->function),
+					&dvid, 0)) {
 				sta = ACPI_STA_ALL;
 				break;
 			}
+		}
+	}
+
+	if (!sta) {
+		/*
+		 * Check for the slot itself since it may be that the
+		 * ACPI slot is a device below PCIe upstream port so in
+		 * that case it may not even be reachable yet.
+		 */
+		if (pci_bus_read_dev_vendor_id(slot->bus,
+				PCI_DEVFN(slot->device, 0), &dvid, 0)) {
+			sta = ACPI_STA_ALL;
 		}
 	}
 
@@ -658,7 +663,7 @@ static void trim_stale_devices(struct pci_dev *dev)
 
 		status = acpi_evaluate_integer(adev->handle, "_STA", NULL, &sta);
 		alive = (ACPI_SUCCESS(status) && device_status_valid(sta))
-			|| acpiphp_no_hotplug(adev);
+			|| dev->ignore_hotplug;
 	}
 	if (!alive)
 		alive = pci_device_is_present(dev);
@@ -974,8 +979,10 @@ int acpiphp_enable_slot(struct acpiphp_slot *slot)
 {
 	pci_lock_rescan_remove();
 
-	if (slot->flags & SLOT_IS_GOING_AWAY)
+	if (slot->flags & SLOT_IS_GOING_AWAY) {
+		pci_unlock_rescan_remove();
 		return -ENODEV;
+	}
 
 	/* configure all functions */
 	if (!(slot->flags & SLOT_ENABLED))

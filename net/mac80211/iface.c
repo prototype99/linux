@@ -74,7 +74,8 @@ bool __ieee80211_recalc_txpower(struct ieee80211_sub_if_data *sdata)
 
 void ieee80211_recalc_txpower(struct ieee80211_sub_if_data *sdata)
 {
-	if (__ieee80211_recalc_txpower(sdata))
+	if (__ieee80211_recalc_txpower(sdata) ||
+	    ieee80211_sdata_running(sdata))
 		ieee80211_bss_info_change_notify(sdata, BSS_CHANGED_TXPOWER);
 }
 
@@ -765,10 +766,12 @@ static void ieee80211_do_stop(struct ieee80211_sub_if_data *sdata,
 	int i, flushed;
 	struct ps_data *ps;
 	struct cfg80211_chan_def chandef;
+	bool cancel_scan;
 
 	clear_bit(SDATA_STATE_RUNNING, &sdata->state);
 
-	if (rcu_access_pointer(local->scan_sdata) == sdata)
+	cancel_scan = rcu_access_pointer(local->scan_sdata) == sdata;
+	if (cancel_scan)
 		ieee80211_scan_cancel(local);
 
 	/*
@@ -952,6 +955,8 @@ static void ieee80211_do_stop(struct ieee80211_sub_if_data *sdata,
 	if (local->open_count == 0)
 		ieee80211_clear_tx_pending(local);
 
+	sdata->vif.bss_conf.beacon_int = 0;
+
 	/*
 	 * If the interface goes down while suspended, presumably because
 	 * the device was unplugged and that happens before our resume,
@@ -988,6 +993,9 @@ static void ieee80211_do_stop(struct ieee80211_sub_if_data *sdata,
 	}
 
 	ieee80211_recalc_ps(local, -1);
+
+	if (cancel_scan)
+		flush_delayed_work(&local->scan_work);
 
 	if (local->open_count == 0) {
 		ieee80211_stop_device(local);

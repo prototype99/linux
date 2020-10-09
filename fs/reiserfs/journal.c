@@ -1947,8 +1947,6 @@ static int do_journal_release(struct reiserfs_transaction_handle *th,
 		}
 	}
 
-	/* wait for all commits to finish */
-	cancel_delayed_work(&SB_JOURNAL(sb)->j_work);
 
 	/*
 	 * We must release the write lock here because
@@ -1956,8 +1954,14 @@ static int do_journal_release(struct reiserfs_transaction_handle *th,
 	 */
 	reiserfs_write_unlock(sb);
 
+	/*
+	 * Cancel flushing of old commits. Note that neither of these works
+	 * will be requeued because superblock is being shutdown and doesn't
+	 * have MS_ACTIVE set.
+	 */
 	cancel_delayed_work_sync(&REISERFS_SB(sb)->old_work);
-	flush_workqueue(REISERFS_SB(sb)->commit_wq);
+	/* wait for all commits to finish */
+	cancel_delayed_work_sync(&SB_JOURNAL(sb)->j_work);
 
 	free_journal_ram(sb);
 
@@ -2637,7 +2641,7 @@ static int journal_init_dev(struct super_block *super,
 	if (IS_ERR(journal->j_dev_bd)) {
 		result = PTR_ERR(journal->j_dev_bd);
 		journal->j_dev_bd = NULL;
-		reiserfs_warning(super,
+		reiserfs_warning(super, "sh-457",
 				 "journal_init_dev: Cannot open '%s': %i",
 				 jdev_name, result);
 		return result;
@@ -4292,9 +4296,15 @@ static int do_journal_end(struct reiserfs_transaction_handle *th, int flags)
 	if (flush) {
 		flush_commit_list(sb, jl, 1);
 		flush_journal_list(sb, jl, 1);
-	} else if (!(jl->j_state & LIST_COMMIT_PENDING))
-		queue_delayed_work(REISERFS_SB(sb)->commit_wq,
-				   &journal->j_work, HZ / 10);
+	} else if (!(jl->j_state & LIST_COMMIT_PENDING)) {
+		/*
+		 * Avoid queueing work when sb is being shut down. Transaction
+		 * will be flushed on journal shutdown.
+		 */
+		if (sb->s_flags & MS_ACTIVE)
+			queue_delayed_work(REISERFS_SB(sb)->commit_wq,
+					   &journal->j_work, HZ / 10);
+	}
 
 	/*
 	 * if the next transaction has any chance of wrapping, flush

@@ -573,7 +573,7 @@ i915_gem_shmem_pread(struct drm_device *dev,
 	char __user *user_data;
 	ssize_t remain;
 	loff_t offset;
-	int shmem_page_offset, page_length, ret = 0;
+	int shmem_page_offset, ret = 0;
 	int obj_do_bit17_swizzling, page_do_bit17_swizzling;
 	int prefaulted = 0;
 	int needs_clflush = 0;
@@ -593,6 +593,7 @@ i915_gem_shmem_pread(struct drm_device *dev,
 	for_each_sg_page(obj->pages->sgl, &sg_iter, obj->pages->nents,
 			 offset >> PAGE_SHIFT) {
 		struct page *page = sg_page_iter_page(&sg_iter);
+		unsigned int page_length;
 
 		if (remain <= 0)
 			break;
@@ -603,9 +604,7 @@ i915_gem_shmem_pread(struct drm_device *dev,
 		 * page_length = bytes to copy for this page
 		 */
 		shmem_page_offset = offset_in_page(offset);
-		page_length = remain;
-		if ((shmem_page_offset + page_length) > PAGE_SIZE)
-			page_length = PAGE_SIZE - shmem_page_offset;
+		page_length = min_t(u64, remain, PAGE_SIZE - shmem_page_offset);
 
 		page_do_bit17_swizzling = obj_do_bit17_swizzling &&
 			(page_to_phys(page) & (1 << 17)) != 0;
@@ -870,7 +869,7 @@ i915_gem_shmem_pwrite(struct drm_device *dev,
 	ssize_t remain;
 	loff_t offset;
 	char __user *user_data;
-	int shmem_page_offset, page_length, ret = 0;
+	int shmem_page_offset, ret = 0;
 	int obj_do_bit17_swizzling, page_do_bit17_swizzling;
 	int hit_slowpath = 0;
 	int needs_clflush_after = 0;
@@ -913,6 +912,7 @@ i915_gem_shmem_pwrite(struct drm_device *dev,
 			 offset >> PAGE_SHIFT) {
 		struct page *page = sg_page_iter_page(&sg_iter);
 		int partial_cacheline_write;
+		unsigned int page_length;
 
 		if (remain <= 0)
 			break;
@@ -923,10 +923,7 @@ i915_gem_shmem_pwrite(struct drm_device *dev,
 		 * page_length = bytes to copy for this page
 		 */
 		shmem_page_offset = offset_in_page(offset);
-
-		page_length = remain;
-		if ((shmem_page_offset + page_length) > PAGE_SIZE)
-			page_length = PAGE_SIZE - shmem_page_offset;
+		page_length = min_t(u64, remain, PAGE_SIZE - shmem_page_offset);
 
 		/* If we don't overwrite a cacheline completely we need to be
 		 * careful to have up-to-date data by first clflushing. Don't
@@ -1576,10 +1573,13 @@ unlock:
 out:
 	switch (ret) {
 	case -EIO:
-		/* If this -EIO is due to a gpu hang, give the reset code a
-		 * chance to clean up the mess. Otherwise return the proper
-		 * SIGBUS. */
-		if (i915_terminally_wedged(&dev_priv->gpu_error)) {
+		/*
+		 * We eat errors when the gpu is terminally wedged to avoid
+		 * userspace unduly crashing (gl has no provisions for mmaps to
+		 * fail). But any other -EIO isn't ours (e.g. swap in failure)
+		 * and so needs to be reported.
+		 */
+		if (!i915_terminally_wedged(&dev_priv->gpu_error)) {
 			ret = VM_FAULT_SIGBUS;
 			break;
 		}
@@ -2991,6 +2991,13 @@ static void i965_write_fence_reg(struct drm_device *dev, int reg,
 		u32 size = i915_gem_obj_ggtt_size(obj);
 		uint64_t val;
 
+		/* Adjust fence size to match tiled area */
+		if (obj->tiling_mode != I915_TILING_NONE) {
+			uint32_t row_size = obj->stride *
+				(obj->tiling_mode == I915_TILING_Y ? 32 : 8);
+			size = (size / row_size) * row_size;
+		}
+
 		val = (uint64_t)((i915_gem_obj_ggtt_offset(obj) + size - 4096) &
 				 0xfffff000) << 32;
 		val |= i915_gem_obj_ggtt_offset(obj) & 0xfffff000;
@@ -3747,6 +3754,7 @@ unlock:
 int i915_gem_set_caching_ioctl(struct drm_device *dev, void *data,
 			       struct drm_file *file)
 {
+	struct drm_i915_private *dev_priv = dev->dev_private;
 	struct drm_i915_gem_caching *args = data;
 	struct drm_i915_gem_object *obj;
 	enum i915_cache_level level;
@@ -3766,9 +3774,11 @@ int i915_gem_set_caching_ioctl(struct drm_device *dev, void *data,
 		return -EINVAL;
 	}
 
+	intel_runtime_pm_get(dev_priv);
+
 	ret = i915_mutex_lock_interruptible(dev);
 	if (ret)
-		return ret;
+		goto rpm_put;
 
 	obj = to_intel_bo(drm_gem_object_lookup(dev, file, args->handle));
 	if (&obj->base == NULL) {
@@ -3781,6 +3791,9 @@ int i915_gem_set_caching_ioctl(struct drm_device *dev, void *data,
 	drm_gem_object_unreference(&obj->base);
 unlock:
 	mutex_unlock(&dev->struct_mutex);
+rpm_put:
+	intel_runtime_pm_put(dev_priv);
+
 	return ret;
 }
 
@@ -4987,7 +5000,7 @@ static bool mutex_is_locked_by(struct mutex *mutex, struct task_struct *task)
 	if (!mutex_is_locked(mutex))
 		return false;
 
-#if defined(CONFIG_SMP) || defined(CONFIG_DEBUG_MUTEXES)
+#if defined(CONFIG_SMP) && !defined(CONFIG_DEBUG_MUTEXES)
 	return mutex->owner == task;
 #else
 	/* Since UP may be pre-empted, we cannot assume that we own the lock */

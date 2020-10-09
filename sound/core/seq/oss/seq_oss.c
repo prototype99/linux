@@ -144,8 +144,6 @@ odev_release(struct inode *inode, struct file *file)
 	if ((dp = file->private_data) == NULL)
 		return 0;
 
-	snd_seq_oss_drain_write(dp);
-
 	mutex_lock(&register_mutex);
 	snd_seq_oss_release(dp);
 	mutex_unlock(&register_mutex);
@@ -196,7 +194,7 @@ odev_poll(struct file *file, poll_table * wait)
 	struct seq_oss_devinfo *dp;
 	dp = file->private_data;
 	if (snd_BUG_ON(!dp))
-		return -ENXIO;
+		return POLLERR;
 	return snd_seq_oss_poll(dp, file, wait);
 }
 

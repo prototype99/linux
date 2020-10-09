@@ -217,11 +217,17 @@ void tty_wait_until_sent(struct tty_struct *tty, long timeout)
 #endif
 	if (!timeout)
 		timeout = MAX_SCHEDULE_TIMEOUT;
+
 	if (wait_event_interruptible_timeout(tty->write_wait,
-			!tty_chars_in_buffer(tty), timeout) >= 0) {
-		if (tty->ops->wait_until_sent)
-			tty->ops->wait_until_sent(tty, timeout);
+			!tty_chars_in_buffer(tty), timeout) < 0) {
+		return;
 	}
+
+	if (timeout == MAX_SCHEDULE_TIMEOUT)
+		timeout = 0;
+
+	if (tty->ops->wait_until_sent)
+		tty->ops->wait_until_sent(tty, timeout);
 }
 EXPORT_SYMBOL(tty_wait_until_sent);
 
@@ -321,7 +327,7 @@ speed_t tty_termios_baud_rate(struct ktermios *termios)
 		else
 			cbaud += 15;
 	}
-	return baud_table[cbaud];
+	return cbaud >= n_baud_table ? 0 : baud_table[cbaud];
 }
 EXPORT_SYMBOL(tty_termios_baud_rate);
 
@@ -357,7 +363,7 @@ speed_t tty_termios_input_baud_rate(struct ktermios *termios)
 		else
 			cbaud += 15;
 	}
-	return baud_table[cbaud];
+	return cbaud >= n_baud_table ? 0 : baud_table[cbaud];
 #else
 	return tty_termios_baud_rate(termios);
 #endif
@@ -401,18 +407,25 @@ void tty_termios_encode_baud_rate(struct ktermios *termios,
 	termios->c_ospeed = obaud;
 
 #ifdef BOTHER
-	/* If the user asked for a precise weird speed give a precise weird
-	   answer. If they asked for a Bfoo speed they many have problems
-	   digesting non-exact replies so fuzz a bit */
-
-	if ((termios->c_cflag & CBAUD) == BOTHER)
-		oclose = 0;
-	if (((termios->c_cflag >> IBSHIFT) & CBAUD) == BOTHER)
-		iclose = 0;
 	if ((termios->c_cflag >> IBSHIFT) & CBAUD)
 		ibinput = 1;	/* An input speed was specified */
+
+	/* If the user asked for a precise weird speed give a precise weird
+	   answer. If they asked for a Bfoo speed they may have problems
+	   digesting non-exact replies so fuzz a bit */
+
+	if ((termios->c_cflag & CBAUD) == BOTHER) {
+		oclose = 0;
+		if (!ibinput)
+			iclose = 0;
+	}
+	if (((termios->c_cflag >> IBSHIFT) & CBAUD) == BOTHER)
+		iclose = 0;
 #endif
 	termios->c_cflag &= ~CBAUD;
+#ifdef IBSHIFT
+	termios->c_cflag &= ~(CBAUD << IBSHIFT);
+#endif
 
 	/*
 	 *	Our goal is to find a close match to the standard baud rate

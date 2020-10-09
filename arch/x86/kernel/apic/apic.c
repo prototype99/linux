@@ -366,6 +366,13 @@ static void __setup_APIC_LVTT(unsigned int clocks, int oneshot, int irqen)
 	apic_write(APIC_LVTT, lvtt_value);
 
 	if (lvtt_value & APIC_LVT_TIMER_TSCDEADLINE) {
+		/*
+		 * See Intel SDM: TSC-Deadline Mode chapter. In xAPIC mode,
+		 * writing to the APIC LVTT and TSC_DEADLINE MSR isn't serialized.
+		 * According to Intel, MFENCE can do the serialization here.
+		 */
+		asm volatile("mfence" : : : "memory");
+
 		printk_once(KERN_DEBUG "TSC deadline timer enabled\n");
 		return;
 	}
@@ -1297,7 +1304,7 @@ void setup_local_APIC(void)
 	unsigned int value, queued;
 	int i, j, acked = 0;
 	unsigned long long tsc = 0, ntsc;
-	long long max_loops = cpu_khz;
+	long long max_loops = cpu_khz ? cpu_khz : 1000000;
 
 	if (cpu_has_tsc)
 		rdtscll(tsc);
@@ -1332,16 +1339,21 @@ void setup_local_APIC(void)
 	apic->init_apic_ldr();
 
 #ifdef CONFIG_X86_32
-	/*
-	 * APIC LDR is initialized.  If logical_apicid mapping was
-	 * initialized during get_smp_config(), make sure it matches the
-	 * actual value.
-	 */
-	i = early_per_cpu(x86_cpu_to_logical_apicid, cpu);
-	WARN_ON(i != BAD_APICID && i != logical_smp_processor_id());
-	/* always use the value from LDR */
-	early_per_cpu(x86_cpu_to_logical_apicid, cpu) =
-		logical_smp_processor_id();
+	if (apic->dest_logical) {
+		int logical_apicid, ldr_apicid;
+
+		/*
+		 * APIC LDR is initialized.  If logical_apicid mapping was
+		 * initialized during get_smp_config(), make sure it matches
+		 * the actual value.
+		 */
+		logical_apicid = early_per_cpu(x86_cpu_to_logical_apicid, cpu);
+		ldr_apicid = GET_APIC_LOGICAL_ID(apic_read(APIC_LDR));
+		if (logical_apicid != BAD_APICID)
+			WARN_ON(logical_apicid != ldr_apicid);
+		/* Always use the value from LDR. */
+		early_per_cpu(x86_cpu_to_logical_apicid, cpu) = ldr_apicid;
+	}
 
 	/*
 	 * Some NUMA implementations (NUMAQ) don't initialize apicid to
@@ -1394,9 +1406,10 @@ void setup_local_APIC(void)
 			break;
 		}
 		if (queued) {
-			if (cpu_has_tsc) {
+			if (cpu_has_tsc && cpu_khz) {
 				rdtscll(ntsc);
-				max_loops = (cpu_khz << 10) - (ntsc - tsc);
+				max_loops = (long long)cpu_khz << 10;
+				max_loops -= ntsc - tsc;
 			} else
 				max_loops--;
 		}
@@ -1602,11 +1615,16 @@ int __init enable_IR(void)
 	return -1;
 }
 
+#ifdef CONFIG_X86_64
+
 void __init enable_IR_x2apic(void)
 {
 	unsigned long flags;
 	int ret, x2apic_enabled = 0;
 	int hardware_init_ret;
+
+	if (skip_ioapic_setup)
+		return;
 
 	/* Make sure irq_remap_ops are initialized */
 	setup_irq_remapping_ops();
@@ -1673,7 +1691,6 @@ skip_x2apic:
 	local_irq_restore(flags);
 }
 
-#ifdef CONFIG_X86_64
 /*
  * Detect and enable local APICs on non-SMP boards.
  * Original code written by Keir Fraser.

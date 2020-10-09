@@ -817,6 +817,7 @@ struct i915_suspend_saved_registers {
 	u32 savePIPEB_LINK_N1;
 	u32 saveMCHBAR_RENDER_STANDBY;
 	u32 savePCH_PORT_HOTPLUG;
+	u16 saveGCDGMBUS;
 };
 
 struct vlv_s0ix_state {
@@ -877,6 +878,7 @@ struct vlv_s0ix_state {
 	/* Display 2 CZ domain */
 	u32 gu_ctl0;
 	u32 gu_ctl1;
+	u32 pcbr;
 	u32 clock_gate_dis2;
 };
 
@@ -908,6 +910,7 @@ struct intel_gen6_power_mgmt {
 	enum { LOW_POWER, BETWEEN, HIGH_POWER } power;
 
 	bool enabled;
+	bool ctx_corrupted;
 	struct delayed_work delayed_resume_work;
 
 	/*
@@ -1826,10 +1829,15 @@ struct drm_i915_cmd_descriptor {
 	 * Describes where to find a register address in the command to check
 	 * against the ring's register whitelist. Only valid if flags has the
 	 * CMD_DESC_REGISTER bit set.
+	 *
+	 * A non-zero step value implies that the command may access multiple
+	 * registers in sequence (e.g. LRI), in that case step gives the
+	 * distance in dwords between individual offset fields.
 	 */
 	struct {
 		u32 offset;
 		u32 mask;
+		u32 step;
 	} reg;
 
 #define MAX_CMD_DESC_BITMASKS 3
@@ -1898,8 +1906,8 @@ struct drm_i915_cmd_table {
 #define IS_HSW_EARLY_SDV(dev)	(IS_HASWELL(dev) && \
 				 ((dev)->pdev->device & 0xFF00) == 0x0C00)
 #define IS_BDW_ULT(dev)		(IS_BROADWELL(dev) && \
-				 (((dev)->pdev->device & 0xf) == 0x2  || \
-				 ((dev)->pdev->device & 0xf) == 0x6 || \
+				 (((dev)->pdev->device & 0xf) == 0x6 || \
+				 ((dev)->pdev->device & 0xf) == 0xb  || \
 				 ((dev)->pdev->device & 0xf) == 0xe))
 #define IS_HSW_ULT(dev)		(IS_HASWELL(dev) && \
 				 ((dev)->pdev->device & 0xFF00) == 0x0A00)
@@ -1952,6 +1960,10 @@ struct drm_i915_cmd_table {
 
 /* Early gen2 have a totally busted CS tlb and require pinned batches. */
 #define HAS_BROKEN_CS_TLB(dev)		(IS_I830(dev) || IS_845G(dev))
+
+#define NEEDS_RC6_CTX_CORRUPTION_WA(dev)	\
+	(IS_BROADWELL(dev) || INTEL_INFO(dev)->gen == 9)
+
 /*
  * dp aux and gmbus irq on gen4 seems to be able to generate legacy interrupts
  * even when in MSI mode. This results in spurious interrupt warnings if the
@@ -2680,15 +2692,14 @@ int vlv_freq_opcode(struct drm_i915_private *dev_priv, int val);
 #define I915_READ64(reg)	dev_priv->uncore.funcs.mmio_readq(dev_priv, (reg), true)
 
 #define I915_READ64_2x32(lower_reg, upper_reg) ({			\
-		u32 upper = I915_READ(upper_reg);			\
-		u32 lower = I915_READ(lower_reg);			\
-		u32 tmp = I915_READ(upper_reg);				\
-		if (upper != tmp) {					\
-			upper = tmp;					\
-			lower = I915_READ(lower_reg);			\
-			WARN_ON(I915_READ(upper_reg) != upper);		\
-		}							\
-		(u64)upper << 32 | lower; })
+	u32 upper, lower, old_upper, loop = 0;				\
+	upper = I915_READ(upper_reg);					\
+	do {								\
+		old_upper = upper;					\
+		lower = I915_READ(lower_reg);				\
+		upper = I915_READ(upper_reg);				\
+	} while (upper != old_upper && loop++ < 2);			\
+	(u64)upper << 32 | lower; })
 
 #define POSTING_READ(reg)	(void)I915_READ_NOTRACE(reg)
 #define POSTING_READ16(reg)	(void)I915_READ16_NOTRACE(reg)

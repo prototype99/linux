@@ -79,6 +79,7 @@
 #include <linux/delayacct.h>
 #include <linux/seq_file.h>
 #include <linux/pid_namespace.h>
+#include <linux/prctl.h>
 #include <linux/ptrace.h>
 #include <linux/tracehook.h>
 #include <linux/user_namespace.h>
@@ -297,14 +298,10 @@ static void render_cap_t(struct seq_file *m, const char *header,
 	seq_puts(m, header);
 	CAP_FOR_EACH_U32(__capi) {
 		seq_printf(m, "%08x",
-			   a->cap[(_KERNEL_CAPABILITY_U32S-1) - __capi]);
+			   a->cap[CAP_LAST_U32 - __capi]);
 	}
 	seq_putc(m, '\n');
 }
-
-/* Remove non-existent capabilities */
-#define NORM_CAPS(v) (v.cap[CAP_TO_INDEX(CAP_LAST_CAP)] &= \
-				CAP_TO_MASK(CAP_LAST_CAP + 1) - 1)
 
 static inline void task_cap(struct seq_file *m, struct task_struct *p)
 {
@@ -319,11 +316,6 @@ static inline void task_cap(struct seq_file *m, struct task_struct *p)
 	cap_bset	= cred->cap_bset;
 	rcu_read_unlock();
 
-	NORM_CAPS(cap_inheritable);
-	NORM_CAPS(cap_permitted);
-	NORM_CAPS(cap_effective);
-	NORM_CAPS(cap_bset);
-
 	render_cap_t(m, "CapInh:\t", &cap_inheritable);
 	render_cap_t(m, "CapPrm:\t", &cap_permitted);
 	render_cap_t(m, "CapEff:\t", &cap_effective);
@@ -335,6 +327,31 @@ static inline void task_seccomp(struct seq_file *m, struct task_struct *p)
 #ifdef CONFIG_SECCOMP
 	seq_printf(m, "Seccomp:\t%d\n", p->seccomp.mode);
 #endif
+	seq_printf(m, "Speculation_Store_Bypass:\t");
+	switch (arch_prctl_spec_ctrl_get(p, PR_SPEC_STORE_BYPASS)) {
+	case -EINVAL:
+		seq_printf(m, "unknown");
+		break;
+	case PR_SPEC_NOT_AFFECTED:
+		seq_printf(m, "not vulnerable");
+		break;
+	case PR_SPEC_PRCTL | PR_SPEC_FORCE_DISABLE:
+		seq_printf(m, "thread force mitigated");
+		break;
+	case PR_SPEC_PRCTL | PR_SPEC_DISABLE:
+		seq_printf(m, "thread mitigated");
+		break;
+	case PR_SPEC_PRCTL | PR_SPEC_ENABLE:
+		seq_printf(m, "thread vulnerable");
+		break;
+	case PR_SPEC_DISABLE:
+		seq_printf(m, "globally mitigated");
+		break;
+	default:
+		seq_printf(m, "vulnerable");
+		break;
+	}
+	seq_putc(m, '\n');
 }
 
 static inline void task_context_switch_counts(struct seq_file *m,
@@ -380,7 +397,7 @@ int proc_pid_status(struct seq_file *m, struct pid_namespace *ns,
 static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
 			struct pid *pid, struct task_struct *task, int whole)
 {
-	unsigned long vsize, eip, esp, wchan = ~0UL;
+	unsigned long vsize, eip, esp, wchan = 0;
 	int priority, nice;
 	int tty_pgrp = -1, tty_nr = 0;
 	sigset_t sigign, sigcatch;
@@ -400,7 +417,7 @@ static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
 
 	state = *get_task_state(task);
 	vsize = eip = esp = 0;
-	permitted = ptrace_may_access(task, PTRACE_MODE_READ | PTRACE_MODE_NOAUDIT);
+	permitted = ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS | PTRACE_MODE_NOAUDIT);
 	mm = get_task_mm(task);
 	if (mm) {
 		vsize = task_vsize(mm);
@@ -517,7 +534,19 @@ static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
 	seq_put_decimal_ull(m, ' ', task->blocked.sig[0] & 0x7fffffffUL);
 	seq_put_decimal_ull(m, ' ', sigign.sig[0] & 0x7fffffffUL);
 	seq_put_decimal_ull(m, ' ', sigcatch.sig[0] & 0x7fffffffUL);
-	seq_put_decimal_ull(m, ' ', wchan);
+
+	/*
+	 * We used to output the absolute kernel address, but that's an
+	 * information leak - so instead we show a 0/1 flag here, to signal
+	 * to user-space whether there's a wchan field in /proc/PID/wchan.
+	 *
+	 * This works with older implementations of procps as well.
+	 */
+	if (wchan)
+		seq_puts(m, " 1");
+	else
+		seq_puts(m, " 0");
+
 	seq_put_decimal_ull(m, ' ', 0);
 	seq_put_decimal_ull(m, ' ', 0);
 	seq_put_decimal_ll(m, ' ', task->exit_signal);

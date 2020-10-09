@@ -16,6 +16,7 @@
 #include <linux/kthread.h>
 #include <linux/scatterlist.h>
 #include <linux/dma-mapping.h>
+#include <linux/backing-dev.h>
 
 #include <linux/mmc/card.h>
 #include <linux/mmc/host.h>
@@ -38,7 +39,7 @@ static int mmc_prep_request(struct request_queue *q, struct request *req)
 		return BLKPREP_KILL;
 	}
 
-	if (mq && mmc_card_removed(mq->card))
+	if (mq && (mmc_card_removed(mq->card) || mmc_access_rpmb(mq)))
 		return BLKPREP_KILL;
 
 	req->cmd_flags |= REQ_DONTPREP;
@@ -203,6 +204,10 @@ int mmc_init_queue(struct mmc_queue *mq, struct mmc_card *card,
 	mq->queue = blk_init_queue(mmc_request_fn, lock);
 	if (!mq->queue)
 		return -ENOMEM;
+
+	if (mmc_host_is_spi(host) && host->use_spi_crc)
+		mq->queue->backing_dev_info.capabilities |=
+			BDI_CAP_STABLE_WRITES;
 
 	mq->mqrq_cur = mqrq_cur;
 	mq->mqrq_prev = mqrq_prev;

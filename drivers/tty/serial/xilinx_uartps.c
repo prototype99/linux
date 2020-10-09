@@ -1007,7 +1007,7 @@ static struct uart_port *cdns_uart_get_port(int id)
 	struct uart_port *port;
 
 	/* Try the given port id if failed use default method */
-	if (cdns_uart_port[id].mapbase != 0) {
+	if (id < CDNS_UART_NR_PORTS && cdns_uart_port[id].mapbase != 0) {
 		/* Find the next unused port */
 		for (id = 0; id < CDNS_UART_NR_PORTS; id++)
 			if (cdns_uart_port[id].mapbase == 0)
@@ -1290,9 +1290,9 @@ static SIMPLE_DEV_PM_OPS(cdns_uart_dev_pm_ops, cdns_uart_suspend,
  */
 static int cdns_uart_probe(struct platform_device *pdev)
 {
-	int rc, id;
+	int rc, id, irq;
 	struct uart_port *port;
-	struct resource *res, *res2;
+	struct resource *res;
 	struct cdns_uart *cdns_uart_data;
 
 	cdns_uart_data = devm_kzalloc(&pdev->dev, sizeof(*cdns_uart_data),
@@ -1339,9 +1339,9 @@ static int cdns_uart_probe(struct platform_device *pdev)
 		goto err_out_clk_disable;
 	}
 
-	res2 = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
-	if (!res2) {
-		rc = -ENODEV;
+	irq = platform_get_irq(pdev, 0);
+	if (irq <= 0) {
+		rc = -ENXIO;
 		goto err_out_clk_disable;
 	}
 
@@ -1370,7 +1370,7 @@ static int cdns_uart_probe(struct platform_device *pdev)
 		 * and triggers invocation of the config_port() entry point.
 		 */
 		port->mapbase = res->start;
-		port->irq = res2->start;
+		port->irq = irq;
 		port->dev = &pdev->dev;
 		port->uartclk = clk_get_rate(cdns_uart_data->uartclk);
 		port->private_data = cdns_uart_data;

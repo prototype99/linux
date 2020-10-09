@@ -822,6 +822,8 @@ xfs_bmap_extents_to_btree(
 	*logflagsp = 0;
 	if ((error = xfs_alloc_vextent(&args))) {
 		xfs_iroot_realloc(ip, -1, whichfork);
+		ASSERT(ifp->if_broot == NULL);
+		XFS_IFORK_FMT_SET(ip, whichfork, XFS_DINODE_FMT_EXTENTS);
 		xfs_btree_del_cursor(cur, XFS_BTREE_ERROR);
 		return error;
 	}
@@ -976,7 +978,11 @@ xfs_bmap_local_to_extents(
 	*firstblock = args.fsbno;
 	bp = xfs_btree_get_bufl(args.mp, tp, args.fsbno, 0);
 
-	/* initialise the block and copy the data */
+	/*
+	 * Initialise the block and copy the data
+	 *
+	 * Note: init_fn must set the buffer log item type correctly!
+	 */
 	init_fn(tp, bp, ip, ifp);
 
 	/* account for the change in fork size and log everything */

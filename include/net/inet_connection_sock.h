@@ -62,6 +62,7 @@ struct inet_connection_sock_af_ops {
 	void	    (*addr2sockaddr)(struct sock *sk, struct sockaddr *);
 	int	    (*bind_conflict)(const struct sock *sk,
 				     const struct inet_bind_bucket *tb, bool relax);
+	void	    (*mtu_reduced)(struct sock *sk);
 };
 
 /** inet_connection_sock - INET connection oriented sock
@@ -284,11 +285,6 @@ static inline void inet_csk_reqsk_queue_added(struct sock *sk,
 static inline int inet_csk_reqsk_queue_len(const struct sock *sk)
 {
 	return reqsk_queue_len(&inet_csk(sk)->icsk_accept_queue);
-}
-
-static inline int inet_csk_reqsk_queue_young(const struct sock *sk)
-{
-	return reqsk_queue_len_young(&inet_csk(sk)->icsk_accept_queue);
 }
 
 static inline int inet_csk_reqsk_queue_is_full(const struct sock *sk)

@@ -164,7 +164,8 @@ static void req_done(struct virtqueue *vq)
 		p9_debug(P9_DEBUG_TRANS, ": rc %p\n", rc);
 		p9_debug(P9_DEBUG_TRANS, ": lookup tag %d\n", rc->tag);
 		req = p9_tag_lookup(chan->client, rc->tag);
-		p9_client_cb(chan->client, req, REQ_STATUS_RCVD);
+		if (len)
+			p9_client_cb(chan->client, req, REQ_STATUS_RCVD);
 	}
 }
 
@@ -192,7 +193,7 @@ static int pack_sg_list(struct scatterlist *sg, int start,
 		s = rest_of_page(data);
 		if (s > count)
 			s = count;
-		BUG_ON(index > limit);
+		BUG_ON(index >= limit);
 		/* Make sure we don't terminate early. */
 		sg_unmark_end(&sg[index]);
 		sg_set_buf(&sg[index++], data, s);
@@ -238,6 +239,7 @@ pack_sg_list_p(struct scatterlist *sg, int start, int limit,
 		s = rest_of_page(data);
 		if (s > count)
 			s = count;
+		BUG_ON(index >= limit);
 		/* Make sure we don't terminate early. */
 		sg_unmark_end(&sg[index]);
 		sg_set_page(&sg[index++], pdata[i++], s, data_off);
@@ -292,8 +294,8 @@ req_retry:
 		if (err == -ENOSPC) {
 			chan->ring_bufs_avail = 0;
 			spin_unlock_irqrestore(&chan->lock, flags);
-			err = wait_event_interruptible(*chan->vc_wq,
-							chan->ring_bufs_avail);
+			err = wait_event_killable(*chan->vc_wq,
+						  chan->ring_bufs_avail);
 			if (err  == -ERESTARTSYS)
 				return err;
 
@@ -324,7 +326,7 @@ static int p9_get_mapped_pages(struct virtio_chan *chan,
 		 * Other zc request to finish here
 		 */
 		if (atomic_read(&vp_pinned) >= chan->p9_max_pages) {
-			err = wait_event_interruptible(vp_wq,
+			err = wait_event_killable(vp_wq,
 			      (atomic_read(&vp_pinned) < chan->p9_max_pages));
 			if (err == -ERESTARTSYS)
 				return err;
@@ -377,6 +379,7 @@ p9_virtio_zc_request(struct p9_client *client, struct p9_req_t *req,
 	p9_debug(P9_DEBUG_TRANS, "virtio request\n");
 
 	if (uodata) {
+		__le32 sz;
 		out_nr_pages = p9_nr_pages(uodata, outlen);
 		out_pages = kmalloc(sizeof(struct page *) * out_nr_pages,
 				    GFP_NOFS);
@@ -392,6 +395,12 @@ p9_virtio_zc_request(struct p9_client *client, struct p9_req_t *req,
 			out_pages = NULL;
 			goto err_out;
 		}
+		/* The size field of the message must include the length of the
+		 * header and the length of the data.  We didn't actually know
+		 * the length of the data until this point so add it in now.
+		 */
+		sz = cpu_to_le32(req->tc->size + outlen);
+		memcpy(&req->tc->sdata[0], &sz, sizeof(sz));
 	}
 	if (uidata) {
 		in_nr_pages = p9_nr_pages(uidata, inlen);
@@ -454,8 +463,8 @@ req_retry_pinned:
 		if (err == -ENOSPC) {
 			chan->ring_bufs_avail = 0;
 			spin_unlock_irqrestore(&chan->lock, flags);
-			err = wait_event_interruptible(*chan->vc_wq,
-						       chan->ring_bufs_avail);
+			err = wait_event_killable(*chan->vc_wq,
+						  chan->ring_bufs_avail);
 			if (err  == -ERESTARTSYS)
 				goto err_out;
 
@@ -472,8 +481,7 @@ req_retry_pinned:
 	virtqueue_kick(chan->vq);
 	spin_unlock_irqrestore(&chan->lock, flags);
 	p9_debug(P9_DEBUG_TRANS, "virtio request kicked\n");
-	err = wait_event_interruptible(*req->wq,
-				       req->status >= REQ_STATUS_RCVD);
+	err = wait_event_killable(*req->wq, req->status >= REQ_STATUS_RCVD);
 	/*
 	 * Non kernel buffers are pinned, unpin them
 	 */
@@ -615,6 +623,9 @@ p9_virtio_create(struct p9_client *client, const char *devname, char *args)
 	int ret = -ENOENT;
 	int found = 0;
 
+	if (devname == NULL)
+		return -EINVAL;
+
 	mutex_lock(&virtio_9p_lock);
 	list_for_each_entry(chan, &virtio_chan_list, chan_list) {
 		if (!strncmp(devname, chan->tag, chan->tag_len) &&
@@ -707,10 +718,16 @@ static struct p9_trans_module p9_virtio_trans = {
 /* The standard init function */
 static int __init p9_virtio_init(void)
 {
+	int rc;
+
 	INIT_LIST_HEAD(&virtio_chan_list);
 
 	v9fs_register_trans(&p9_virtio_trans);
-	return register_virtio_driver(&p9_virtio_drv);
+	rc = register_virtio_driver(&p9_virtio_drv);
+	if (rc)
+		v9fs_unregister_trans(&p9_virtio_trans);
+
+	return rc;
 }
 
 static void __exit p9_virtio_cleanup(void)

@@ -403,7 +403,7 @@ static int nfs_write_end(struct file *file, struct address_space *mapping,
 	 */
 	if (!PageUptodate(page)) {
 		unsigned pglen = nfs_page_length(page);
-		unsigned end = offset + len;
+		unsigned end = offset + copied;
 
 		if (pglen == 0) {
 			zero_user_segments(page, 0, offset,
@@ -618,7 +618,6 @@ static const struct vm_operations_struct nfs_file_vm_ops = {
 	.fault = filemap_fault,
 	.map_pages = filemap_map_pages,
 	.page_mkwrite = nfs_vm_page_mkwrite,
-	.remap_pages = generic_file_remap_pages,
 };
 
 static int nfs_need_sync_write(struct file *filp, struct inode *inode)

@@ -277,6 +277,10 @@ int ipc_addid(struct ipc_ids *ids, struct kern_ipc_perm *new, int size)
 	rcu_read_lock();
 	spin_lock(&new->lock);
 
+	current_euid_egid(&euid, &egid);
+	new->cuid = new->uid = euid;
+	new->gid = new->cgid = egid;
+
 	id = idr_alloc(&ids->ipcs_idr, new,
 		       (next_id < 0) ? 0 : ipcid_to_idx(next_id), 0,
 		       GFP_NOWAIT);
@@ -288,10 +292,6 @@ int ipc_addid(struct ipc_ids *ids, struct kern_ipc_perm *new, int size)
 	}
 
 	ids->in_use++;
-
-	current_euid_egid(&euid, &egid);
-	new->cuid = new->uid = euid;
-	new->gid = new->cgid = egid;
 
 	if (next_id < 0) {
 		new->seq = ids->seq++;
@@ -777,8 +777,15 @@ int ipc_parse_version(int *cmd)
 #ifdef CONFIG_PROC_FS
 struct ipc_proc_iter {
 	struct ipc_namespace *ns;
+	struct pid_namespace *pid_ns;
 	struct ipc_proc_iface *iface;
 };
+
+struct pid_namespace *ipc_seq_pid_ns(struct seq_file *s)
+{
+	struct ipc_proc_iter *iter = s->private;
+	return iter->pid_ns;
+}
 
 /*
  * This routine locks the ipc structure found at least at position pos.
@@ -877,8 +884,10 @@ static int sysvipc_proc_show(struct seq_file *s, void *it)
 	struct ipc_proc_iter *iter = s->private;
 	struct ipc_proc_iface *iface = iter->iface;
 
-	if (it == SEQ_START_TOKEN)
-		return seq_puts(s, iface->header);
+	if (it == SEQ_START_TOKEN) {
+		seq_puts(s, iface->header);
+		return 0;
+	}
 
 	return iface->show(s, it);
 }
@@ -912,6 +921,7 @@ static int sysvipc_proc_open(struct inode *inode, struct file *file)
 
 	iter->iface = PDE_DATA(inode);
 	iter->ns    = get_ipc_ns(current->nsproxy->ipc_ns);
+	iter->pid_ns = get_pid_ns(task_active_pid_ns(current));
 out:
 	return ret;
 }
@@ -921,6 +931,7 @@ static int sysvipc_proc_release(struct inode *inode, struct file *file)
 	struct seq_file *seq = file->private_data;
 	struct ipc_proc_iter *iter = seq->private;
 	put_ipc_ns(iter->ns);
+	put_pid_ns(iter->pid_ns);
 	return seq_release_private(inode, file);
 }
 

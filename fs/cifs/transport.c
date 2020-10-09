@@ -58,6 +58,7 @@ AllocMidQEntry(const struct smb_hdr *smb_buffer, struct TCP_Server_Info *server)
 		return temp;
 	else {
 		memset(temp, 0, sizeof(struct mid_q_entry));
+		kref_init(&temp->refcount);
 		temp->mid = get_mid(smb_buffer);
 		temp->pid = current->pid;
 		temp->command = cpu_to_le16(smb_buffer->Command);
@@ -71,6 +72,8 @@ AllocMidQEntry(const struct smb_hdr *smb_buffer, struct TCP_Server_Info *server)
 		 * The default is for the mid to be synchronous, so the
 		 * default callback just wakes up the current task.
 		 */
+		get_task_struct(current);
+		temp->creator = current;
 		temp->callback = cifs_wake_up_task;
 		temp->callback_data = current;
 	}
@@ -78,6 +81,23 @@ AllocMidQEntry(const struct smb_hdr *smb_buffer, struct TCP_Server_Info *server)
 	atomic_inc(&midCount);
 	temp->mid_state = MID_REQUEST_ALLOCATED;
 	return temp;
+}
+
+static void _cifs_mid_q_entry_release(struct kref *refcount)
+{
+	struct mid_q_entry *mid = container_of(refcount, struct mid_q_entry,
+					       refcount);
+
+	put_task_struct(mid->creator);
+
+	mempool_free(mid, cifs_mid_poolp);
+}
+
+void cifs_mid_q_entry_release(struct mid_q_entry *midEntry)
+{
+	spin_lock(&GlobalMid_Lock);
+	kref_put(&midEntry->refcount, _cifs_mid_q_entry_release);
+	spin_unlock(&GlobalMid_Lock);
 }
 
 void
@@ -108,7 +128,7 @@ DeleteMidQEntry(struct mid_q_entry *midEntry)
 		}
 	}
 #endif
-	mempool_free(midEntry, cifs_mid_poolp);
+	cifs_mid_q_entry_release(midEntry);
 }
 
 void
@@ -360,7 +380,7 @@ uncork:
 	if (rc < 0 && rc != -EINTR)
 		cifs_dbg(VFS, "Error %d sending data on socket to server\n",
 			 rc);
-	else
+	else if (rc > 0)
 		rc = 0;
 
 	return rc;
@@ -564,14 +584,16 @@ cifs_call_async(struct TCP_Server_Info *server, struct smb_rqst *rqst,
 	cifs_in_send_dec(server);
 	cifs_save_when_sent(mid);
 
-	if (rc < 0)
+	if (rc < 0) {
 		server->sequence_number -= 2;
+		cifs_delete_mid(mid);
+	}
+
 	mutex_unlock(&server->srv_mutex);
 
 	if (rc == 0)
 		return 0;
 
-	cifs_delete_mid(mid);
 	add_credits(server, 1, optype);
 	wake_up(&server->request_q);
 	return rc;
@@ -771,9 +793,11 @@ SendReceive2(const unsigned int xid, struct cifs_ses *ses,
 
 	rc = wait_for_response(ses->server, midQ);
 	if (rc != 0) {
+		cifs_dbg(FYI, "Cancelling wait for mid %llu\n",	midQ->mid);
 		send_cancel(ses->server, buf, midQ);
 		spin_lock(&GlobalMid_Lock);
 		if (midQ->mid_state == MID_REQUEST_SUBMITTED) {
+			midQ->mid_flags |= MID_WAIT_CANCELLED;
 			midQ->callback = DeleteMidQEntry;
 			spin_unlock(&GlobalMid_Lock);
 			cifs_small_buf_release(buf);

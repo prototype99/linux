@@ -24,6 +24,7 @@
 #include <linux/rcupdate.h>
 #include <linux/export.h>
 #include <linux/context_tracking.h>
+#include <linux/nospec.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -190,8 +191,8 @@ unsigned long kernel_stack_pointer(struct pt_regs *regs)
 		return sp;
 
 	prev_esp = (u32 *)(context);
-	if (prev_esp)
-		return (unsigned long)prev_esp;
+	if (*prev_esp)
+		return (unsigned long)*prev_esp;
 
 	return (unsigned long)regs;
 }
@@ -707,7 +708,8 @@ static unsigned long ptrace_get_debugreg(struct task_struct *tsk, int n)
 	unsigned long val = 0;
 
 	if (n < HBP_NUM) {
-		struct perf_event *bp = thread->ptrace_bps[n];
+		int index = array_index_nospec(n, HBP_NUM);
+		struct perf_event *bp = thread->ptrace_bps[index];
 
 		if (bp)
 			val = bp->hw.info.address;
@@ -1441,15 +1443,6 @@ void send_sigtrap(struct task_struct *tsk, struct pt_regs *regs,
 	force_sig_info(SIGTRAP, &info, tsk);
 }
 
-
-#ifdef CONFIG_X86_32
-# define IS_IA32	1
-#elif defined CONFIG_IA32_EMULATION
-# define IS_IA32	is_compat_task()
-#else
-# define IS_IA32	0
-#endif
-
 /*
  * We must return the syscall number to actually look up in the table.
  * This can be -1L to skip running any syscall at all.
@@ -1487,7 +1480,7 @@ long syscall_trace_enter(struct pt_regs *regs)
 	if (unlikely(test_thread_flag(TIF_SYSCALL_TRACEPOINT)))
 		trace_sys_enter(regs, regs->orig_ax);
 
-	if (IS_IA32)
+	if (is_ia32_task())
 		audit_syscall_entry(AUDIT_ARCH_I386,
 				    regs->orig_ax,
 				    regs->bx, regs->cx,

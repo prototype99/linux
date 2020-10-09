@@ -27,14 +27,18 @@
 #include <linux/bug.h>
 #include <linux/errno.h>
 
-#ifndef __HAVE_ARCH_STRNICMP
+#include <asm/byteorder.h>
+#include <asm/word-at-a-time.h>
+#include <asm/page.h>
+
+#ifndef __HAVE_ARCH_STRNCASECMP
 /**
- * strnicmp - Case insensitive, length-limited string comparison
+ * strncasecmp - Case insensitive, length-limited string comparison
  * @s1: One string
  * @s2: The other string
  * @len: the maximum number of characters to compare
  */
-int strnicmp(const char *s1, const char *s2, size_t len)
+int strncasecmp(const char *s1, const char *s2, size_t len)
 {
 	/* Yes, Virginia, it had better be unsigned */
 	unsigned char c1, c2;
@@ -56,6 +60,13 @@ int strnicmp(const char *s1, const char *s2, size_t len)
 	} while (--len);
 	return (int)c1 - (int)c2;
 }
+EXPORT_SYMBOL(strncasecmp);
+#endif
+#ifndef __HAVE_ARCH_STRNICMP
+int strnicmp(const char *s1, const char *s2, size_t len)
+{
+	return strncasecmp(s1, s2, len);
+}
 EXPORT_SYMBOL(strnicmp);
 #endif
 
@@ -71,20 +82,6 @@ int strcasecmp(const char *s1, const char *s2)
 	return c1 - c2;
 }
 EXPORT_SYMBOL(strcasecmp);
-#endif
-
-#ifndef __HAVE_ARCH_STRNCASECMP
-int strncasecmp(const char *s1, const char *s2, size_t n)
-{
-	int c1, c2;
-
-	do {
-		c1 = tolower(*s1++);
-		c2 = tolower(*s2++);
-	} while ((--n > 0) && c1 == c2 && c1 != 0);
-	return c1 - c2;
-}
-EXPORT_SYMBOL(strncasecmp);
 #endif
 
 #ifndef __HAVE_ARCH_STRCPY
@@ -158,6 +155,90 @@ size_t strlcpy(char *dest, const char *src, size_t size)
 	return ret;
 }
 EXPORT_SYMBOL(strlcpy);
+#endif
+
+#ifndef __HAVE_ARCH_STRSCPY
+/**
+ * strscpy - Copy a C-string into a sized buffer
+ * @dest: Where to copy the string to
+ * @src: Where to copy the string from
+ * @count: Size of destination buffer
+ *
+ * Copy the string, or as much of it as fits, into the dest buffer.
+ * The routine returns the number of characters copied (not including
+ * the trailing NUL) or -E2BIG if the destination buffer wasn't big enough.
+ * The behavior is undefined if the string buffers overlap.
+ * The destination buffer is always NUL terminated, unless it's zero-sized.
+ *
+ * Preferred to strlcpy() since the API doesn't require reading memory
+ * from the src string beyond the specified "count" bytes, and since
+ * the return value is easier to error-check than strlcpy()'s.
+ * In addition, the implementation is robust to the string changing out
+ * from underneath it, unlike the current strlcpy() implementation.
+ *
+ * Preferred to strncpy() since it always returns a valid string, and
+ * doesn't unnecessarily force the tail of the destination buffer to be
+ * zeroed.  If the zeroing is desired, it's likely cleaner to use strscpy()
+ * with an overflow test, then just memset() the tail of the dest buffer.
+ */
+ssize_t strscpy(char *dest, const char *src, size_t count)
+{
+	const struct word_at_a_time constants = WORD_AT_A_TIME_CONSTANTS;
+	size_t max = count;
+	long res = 0;
+
+	if (count == 0)
+		return -E2BIG;
+
+#ifdef CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS
+	/*
+	 * If src is unaligned, don't cross a page boundary,
+	 * since we don't know if the next page is mapped.
+	 */
+	if ((long)src & (sizeof(long) - 1)) {
+		size_t limit = PAGE_SIZE - ((long)src & (PAGE_SIZE - 1));
+		if (limit < max)
+			max = limit;
+	}
+#else
+	/* If src or dest is unaligned, don't do word-at-a-time. */
+	if (((long) dest | (long) src) & (sizeof(long) - 1))
+		max = 0;
+#endif
+
+	while (max >= sizeof(unsigned long)) {
+		unsigned long c, data;
+
+		c = *(unsigned long *)(src+res);
+		*(unsigned long *)(dest+res) = c;
+		if (has_zero(c, &data, &constants)) {
+			data = prep_zero_mask(c, data, &constants);
+			data = create_zero_mask(data);
+			return res + find_zero(data);
+		}
+		res += sizeof(unsigned long);
+		count -= sizeof(unsigned long);
+		max -= sizeof(unsigned long);
+	}
+
+	while (count) {
+		char c;
+
+		c = src[res];
+		dest[res] = c;
+		if (!c)
+			return res;
+		res++;
+		count--;
+	}
+
+	/* Hit buffer length without finding a NUL; force NUL-termination. */
+	if (res)
+		dest[res-1] = '\0';
+
+	return -E2BIG;
+}
+EXPORT_SYMBOL(strscpy);
 #endif
 
 #ifndef __HAVE_ARCH_STRCAT
@@ -604,6 +685,22 @@ void *memset(void *s, int c, size_t count)
 EXPORT_SYMBOL(memset);
 #endif
 
+/**
+ * memzero_explicit - Fill a region of memory (e.g. sensitive
+ *		      keying data) with 0s.
+ * @s: Pointer to the start of the area.
+ * @count: The size of the area.
+ *
+ * memzero_explicit() doesn't need an arch-specific version as
+ * it just invokes the one of memset() implicitly.
+ */
+void memzero_explicit(void *s, size_t count)
+{
+	memset(s, 0, count);
+	barrier();
+}
+EXPORT_SYMBOL(memzero_explicit);
+
 #ifndef __HAVE_ARCH_MEMCPY
 /**
  * memcpy - Copy one area of memory to another
@@ -677,6 +774,26 @@ __visible int memcmp(const void *cs, const void *ct, size_t count)
 	return res;
 }
 EXPORT_SYMBOL(memcmp);
+#endif
+
+#ifndef __HAVE_ARCH_BCMP
+/**
+ * bcmp - returns 0 if and only if the buffers have identical contents.
+ * @a: pointer to first buffer.
+ * @b: pointer to second buffer.
+ * @len: size of buffers.
+ *
+ * The sign or magnitude of a non-zero return value has no particular
+ * meaning, and architectures may implement their own more efficient bcmp(). So
+ * while this particular implementation is a simple (tail) call to memcmp, do
+ * not rely on anything but whether the return value is zero or non-zero.
+ */
+#undef bcmp
+int bcmp(const void *a, const void *b, size_t len)
+{
+	return memcmp(a, b, len);
+}
+EXPORT_SYMBOL(bcmp);
 #endif
 
 #ifndef __HAVE_ARCH_MEMSCAN

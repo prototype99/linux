@@ -79,7 +79,7 @@ ext4_unaligned_aio(struct inode *inode, struct iov_iter *from, loff_t pos)
 	struct super_block *sb = inode->i_sb;
 	int blockmask = sb->s_blocksize - 1;
 
-	if (pos >= i_size_read(inode))
+	if (pos >= ALIGN(i_size_read(inode), sb->s_blocksize))
 		return 0;
 
 	if ((pos | iov_iter_alignment(from)) & blockmask)
@@ -137,10 +137,10 @@ ext4_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 			iov_iter_truncate(from, sbi->s_bitmap_maxbytes - pos);
 	}
 
+	iocb->private = &overwrite;
 	if (o_direct) {
 		blk_start_plug(&plug);
 
-		iocb->private = &overwrite;
 
 		/* check whether we do a DIO overwrite or not */
 		if (ext4_should_dioread_nolock(inode) && !aio_mutex &&
@@ -173,6 +173,13 @@ ext4_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	}
 
 	ret = __generic_file_write_iter(iocb, from);
+	/*
+	 * Unaligned direct AIO must be the only IO in flight. Otherwise
+	 * overlapping aligned IO after unaligned might result in data
+	 * corruption.
+	 */
+	if (ret == -EIOCBQUEUED && aio_mutex)
+		ext4_unwritten_wait(inode);
 	mutex_unlock(&inode->i_mutex);
 
 	if (ret > 0) {
@@ -192,10 +199,9 @@ errout:
 }
 
 static const struct vm_operations_struct ext4_file_vm_ops = {
-	.fault		= filemap_fault,
+	.fault		= ext4_filemap_fault,
 	.map_pages	= filemap_map_pages,
 	.page_mkwrite   = ext4_page_mkwrite,
-	.remap_pages	= generic_file_remap_pages,
 };
 
 static int ext4_file_mmap(struct file *file, struct vm_area_struct *vma)
@@ -209,52 +215,68 @@ static int ext4_file_mmap(struct file *file, struct vm_area_struct *vma)
 	return 0;
 }
 
-static int ext4_file_open(struct inode * inode, struct file * filp)
+static int ext4_sample_last_mounted(struct super_block *sb,
+				    struct vfsmount *mnt)
 {
-	struct super_block *sb = inode->i_sb;
-	struct ext4_sb_info *sbi = EXT4_SB(inode->i_sb);
-	struct vfsmount *mnt = filp->f_path.mnt;
+	struct ext4_sb_info *sbi = EXT4_SB(sb);
 	struct path path;
 	char buf[64], *cp;
+	handle_t *handle;
+	int err;
 
-	if (unlikely(!(sbi->s_mount_flags & EXT4_MF_MNTDIR_SAMPLED) &&
-		     !(sb->s_flags & MS_RDONLY))) {
-		sbi->s_mount_flags |= EXT4_MF_MNTDIR_SAMPLED;
-		/*
-		 * Sample where the filesystem has been mounted and
-		 * store it in the superblock for sysadmin convenience
-		 * when trying to sort through large numbers of block
-		 * devices or filesystem images.
-		 */
-		memset(buf, 0, sizeof(buf));
-		path.mnt = mnt;
-		path.dentry = mnt->mnt_root;
-		cp = d_path(&path, buf, sizeof(buf));
-		if (!IS_ERR(cp)) {
-			handle_t *handle;
-			int err;
+	if (likely(sbi->s_mount_flags & EXT4_MF_MNTDIR_SAMPLED))
+		return 0;
 
-			handle = ext4_journal_start_sb(sb, EXT4_HT_MISC, 1);
-			if (IS_ERR(handle))
-				return PTR_ERR(handle);
-			BUFFER_TRACE(sbi->s_sbh, "get_write_access");
-			err = ext4_journal_get_write_access(handle, sbi->s_sbh);
-			if (err) {
-				ext4_journal_stop(handle);
-				return err;
-			}
-			strlcpy(sbi->s_es->s_last_mounted, cp,
-				sizeof(sbi->s_es->s_last_mounted));
-			ext4_handle_dirty_super(handle, sb);
-			ext4_journal_stop(handle);
-		}
-	}
+	if (sb->s_flags & MS_RDONLY || !sb_start_intwrite_trylock(sb))
+		return 0;
+
+	sbi->s_mount_flags |= EXT4_MF_MNTDIR_SAMPLED;
+	/*
+	 * Sample where the filesystem has been mounted and
+	 * store it in the superblock for sysadmin convenience
+	 * when trying to sort through large numbers of block
+	 * devices or filesystem images.
+	 */
+	memset(buf, 0, sizeof(buf));
+	path.mnt = mnt;
+	path.dentry = mnt->mnt_root;
+	cp = d_path(&path, buf, sizeof(buf));
+	err = 0;
+	if (IS_ERR(cp))
+		goto out;
+
+	handle = ext4_journal_start_sb(sb, EXT4_HT_MISC, 1);
+	err = PTR_ERR(handle);
+	if (IS_ERR(handle))
+		goto out;
+	BUFFER_TRACE(sbi->s_sbh, "get_write_access");
+	err = ext4_journal_get_write_access(handle, sbi->s_sbh);
+	if (err)
+		goto out_journal;
+	strlcpy(sbi->s_es->s_last_mounted, cp,
+		sizeof(sbi->s_es->s_last_mounted));
+	ext4_handle_dirty_super(handle, sb);
+out_journal:
+	ext4_journal_stop(handle);
+out:
+	sb_end_intwrite(sb);
+	return err;
+}
+
+static int ext4_file_open(struct inode * inode, struct file * filp)
+{
+	int ret;
+
+	ret = ext4_sample_last_mounted(inode->i_sb, filp->f_path.mnt);
+	if (ret)
+		return ret;
+
 	/*
 	 * Set up the jbd2_inode if we are opening the inode for
 	 * writing and the journal is present
 	 */
 	if (filp->f_mode & FMODE_WRITE) {
-		int ret = ext4_inode_attach_jinode(inode);
+		ret = ext4_inode_attach_jinode(inode);
 		if (ret < 0)
 			return ret;
 	}
@@ -307,46 +329,26 @@ static int ext4_find_unwritten_pgoff(struct inode *inode,
 		num = min_t(pgoff_t, end - index, PAGEVEC_SIZE);
 		nr_pages = pagevec_lookup(&pvec, inode->i_mapping, index,
 					  (pgoff_t)num);
-		if (nr_pages == 0) {
-			if (whence == SEEK_DATA)
-				break;
-
-			BUG_ON(whence != SEEK_HOLE);
-			/*
-			 * If this is the first time to go into the loop and
-			 * offset is not beyond the end offset, it will be a
-			 * hole at this offset
-			 */
-			if (lastoff == startoff || lastoff < endoff)
-				found = 1;
+		if (nr_pages == 0)
 			break;
-		}
-
-		/*
-		 * If this is the first time to go into the loop and
-		 * offset is smaller than the first page offset, it will be a
-		 * hole at this offset.
-		 */
-		if (lastoff == startoff && whence == SEEK_HOLE &&
-		    lastoff < page_offset(pvec.pages[0])) {
-			found = 1;
-			break;
-		}
 
 		for (i = 0; i < nr_pages; i++) {
 			struct page *page = pvec.pages[i];
 			struct buffer_head *bh, *head;
 
 			/*
-			 * If the current offset is not beyond the end of given
-			 * range, it will be a hole.
+			 * If current offset is smaller than the page offset,
+			 * there is a hole at this offset.
 			 */
-			if (lastoff < endoff && whence == SEEK_HOLE &&
-			    page->index > end) {
+			if (whence == SEEK_HOLE && lastoff < endoff &&
+			    lastoff < page_offset(pvec.pages[i])) {
 				found = 1;
 				*offset = lastoff;
 				goto out;
 			}
+
+			if (page->index > end)
+				goto out;
 
 			lock_page(page);
 
@@ -364,6 +366,8 @@ static int ext4_find_unwritten_pgoff(struct inode *inode,
 				lastoff = page_offset(page);
 				bh = head = page_buffers(page);
 				do {
+					if (lastoff + bh->b_size <= startoff)
+						goto next;
 					if (buffer_uptodate(bh) ||
 					    buffer_unwritten(bh)) {
 						if (whence == SEEK_DATA)
@@ -378,6 +382,7 @@ static int ext4_find_unwritten_pgoff(struct inode *inode,
 						unlock_page(page);
 						goto out;
 					}
+next:
 					lastoff += bh->b_size;
 					bh = bh->b_this_page;
 				} while (bh != head);
@@ -387,20 +392,18 @@ static int ext4_find_unwritten_pgoff(struct inode *inode,
 			unlock_page(page);
 		}
 
-		/*
-		 * The no. of pages is less than our desired, that would be a
-		 * hole in there.
-		 */
-		if (nr_pages < num && whence == SEEK_HOLE) {
-			found = 1;
-			*offset = lastoff;
+		/* The no. of pages is less than our desired, we are done. */
+		if (nr_pages < num)
 			break;
-		}
 
 		index = pvec.pages[i - 1]->index + 1;
 		pagevec_release(&pvec);
 	} while (index <= end);
 
+	if (whence == SEEK_HOLE && lastoff < endoff) {
+		found = 1;
+		*offset = lastoff;
+	}
 out:
 	pagevec_release(&pvec);
 	return found;

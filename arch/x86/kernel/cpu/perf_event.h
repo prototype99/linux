@@ -79,6 +79,7 @@ struct amd_nb {
 
 /* The maximal number of PEBS events: */
 #define MAX_PEBS_EVENTS		8
+#define PEBS_COUNTER_MASK	((1ULL << MAX_PEBS_EVENTS) - 1)
 
 /*
  * A debug store configuration.
@@ -447,6 +448,7 @@ struct x86_pmu {
 			pebs_active	:1,
 			pebs_broken	:1;
 	int		pebs_record_size;
+	int		pebs_buffer_size;
 	void		(*drain_pebs)(struct pt_regs *regs);
 	struct event_constraint *pebs_constraints;
 	void		(*pebs_aliases)(struct perf_event *event);
@@ -471,6 +473,11 @@ struct x86_pmu {
 	 * Intel host/guest support (KVM)
 	 */
 	struct perf_guest_switch_msr *(*guest_get_msrs)(int *nr);
+
+	/*
+	 * Check period value for PERF_EVENT_IOC_PERIOD ioctl.
+	 */
+	int (*check_period) (struct perf_event *event, u64 period);
 };
 
 #define x86_add_quirk(func_)						\
@@ -632,6 +639,22 @@ static inline int amd_pmu_init(void)
 
 #ifdef CONFIG_CPU_SUP_INTEL
 
+static inline bool intel_pmu_has_bts_period(struct perf_event *event, u64 period)
+{
+	if (event->attr.config == PERF_COUNT_HW_BRANCH_INSTRUCTIONS &&
+	    !event->attr.freq && period == 1)
+		return true;
+
+	return false;
+}
+
+static inline bool intel_pmu_has_bts(struct perf_event *event)
+{
+	struct hw_perf_event *hwc = &event->hw;
+
+	return intel_pmu_has_bts_period(event, hwc->sample_period);
+}
+
 int intel_pmu_save_and_restart(struct perf_event *event);
 
 struct event_constraint *
@@ -704,6 +727,8 @@ void intel_pmu_lbr_init_nhm(void);
 void intel_pmu_lbr_init_atom(void);
 
 void intel_pmu_lbr_init_snb(void);
+
+void intel_pmu_pebs_data_source_nhm(void);
 
 int intel_pmu_setup_lbr_filter(struct perf_event *event);
 

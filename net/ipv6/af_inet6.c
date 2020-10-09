@@ -109,6 +109,9 @@ static int inet6_create(struct net *net, struct socket *sock, int protocol,
 	int try_loading_module = 0;
 	int err;
 
+	if (protocol < 0 || protocol >= IPPROTO_MAX)
+		return -EINVAL;
+
 	/* Look for the requested type/protocol pair. */
 lookup_protocol:
 	err = -ESOCKTNOSUPPORT;
@@ -425,9 +428,11 @@ void inet6_destroy_sock(struct sock *sk)
 
 	/* Free tx options */
 
-	opt = xchg(&np->opt, NULL);
-	if (opt != NULL)
-		sock_kfree_s(sk, opt, opt->tot_len);
+	opt = xchg((__force struct ipv6_txoptions **)&np->opt, NULL);
+	if (opt) {
+		atomic_sub(opt->tot_len, &sk->sk_omem_alloc);
+		txopt_put(opt);
+	}
 }
 EXPORT_SYMBOL_GPL(inet6_destroy_sock);
 
@@ -656,7 +661,10 @@ int inet6_sk_rebuild_header(struct sock *sk)
 		fl6.fl6_sport = inet->inet_sport;
 		security_sk_classify_flow(sk, flowi6_to_flowi(&fl6));
 
-		final_p = fl6_update_dst(&fl6, np->opt, &final);
+		rcu_read_lock();
+		final_p = fl6_update_dst(&fl6, rcu_dereference(np->opt),
+					 &final);
+		rcu_read_unlock();
 
 		dst = ip6_dst_lookup_flow(sk, &fl6, final_p);
 		if (IS_ERR(dst)) {
@@ -812,7 +820,7 @@ static struct pernet_operations inet6_net_ops = {
 static const struct ipv6_stub ipv6_stub_impl = {
 	.ipv6_sock_mc_join = ipv6_sock_mc_join,
 	.ipv6_sock_mc_drop = ipv6_sock_mc_drop,
-	.ipv6_dst_lookup = ip6_dst_lookup,
+	.ipv6_dst_lookup_flow = ip6_dst_lookup_flow,
 	.udpv6_encap_enable = udpv6_encap_enable,
 	.ndisc_send_na = ndisc_send_na,
 	.nd_tbl	= &nd_tbl,
@@ -852,14 +860,14 @@ static int __init inet6_init(void)
 
 	err = proto_register(&pingv6_prot, 1);
 	if (err)
-		goto out_unregister_ping_proto;
+		goto out_unregister_raw_proto;
 
 	/* We MUST register RAW sockets before we create the ICMP6,
 	 * IGMP6, or NDISC control sockets.
 	 */
 	err = rawv6_init();
 	if (err)
-		goto out_unregister_raw_proto;
+		goto out_unregister_ping_proto;
 
 	/* Register the family here so that the init calls below will
 	 * be able to create sockets. (?? is this dangerous ??)
@@ -890,8 +898,6 @@ static int __init inet6_init(void)
 	err = igmp6_init();
 	if (err)
 		goto igmp_fail;
-
-	ipv6_stub = &ipv6_stub_impl;
 
 	err = ipv6_netfilter_init();
 	if (err)
@@ -956,6 +962,10 @@ static int __init inet6_init(void)
 	if (err)
 		goto sysctl_fail;
 #endif
+
+	/* ensure that ipv6 stubs are visible only after ipv6 is ready */
+	wmb();
+	ipv6_stub = &ipv6_stub_impl;
 out:
 	return err;
 

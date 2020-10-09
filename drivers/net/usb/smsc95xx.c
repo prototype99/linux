@@ -516,7 +516,7 @@ static void smsc95xx_set_multicast(struct net_device *netdev)
 static int smsc95xx_phy_update_flowcontrol(struct usbnet *dev, u8 duplex,
 					   u16 lcladv, u16 rmtadv)
 {
-	u32 flow, afc_cfg = 0;
+	u32 flow = 0, afc_cfg;
 
 	int ret = smsc95xx_read_reg(dev, AFC_CFG, &afc_cfg);
 	if (ret < 0)
@@ -527,20 +527,19 @@ static int smsc95xx_phy_update_flowcontrol(struct usbnet *dev, u8 duplex,
 
 		if (cap & FLOW_CTRL_RX)
 			flow = 0xFFFF0002;
-		else
-			flow = 0;
 
-		if (cap & FLOW_CTRL_TX)
+		if (cap & FLOW_CTRL_TX) {
 			afc_cfg |= 0xF;
-		else
+			flow |= 0xFFFF0000;
+		} else {
 			afc_cfg &= ~0xF;
+		}
 
 		netif_dbg(dev, link, dev->net, "rx pause %s, tx pause %s\n",
 				   cap & FLOW_CTRL_RX ? "enabled" : "disabled",
 				   cap & FLOW_CTRL_TX ? "enabled" : "disabled");
 	} else {
 		netif_dbg(dev, link, dev->net, "half duplex\n");
-		flow = 0;
 		afc_cfg |= 0xF;
 	}
 
@@ -726,6 +725,9 @@ static int smsc95xx_ethtool_set_wol(struct net_device *net,
 	struct usbnet *dev = netdev_priv(net);
 	struct smsc95xx_priv *pdata = (struct smsc95xx_priv *)(dev->data[0]);
 	int ret;
+
+	if (wolinfo->wolopts & ~SUPPORTED_WAKE)
+		return -EINVAL;
 
 	pdata->wolopts = wolinfo->wolopts & SUPPORTED_WAKE;
 

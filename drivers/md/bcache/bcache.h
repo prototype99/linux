@@ -348,6 +348,7 @@ struct cached_dev {
 	/* Limit number of writeback bios in flight */
 	struct semaphore	in_flight;
 	struct task_struct	*writeback_thread;
+	struct workqueue_struct	*writeback_write_wq;
 
 	struct keybuf		writeback_keys;
 
@@ -897,6 +898,7 @@ void bch_prio_write(struct cache *);
 void bch_write_bdev_super(struct cached_dev *, struct closure *);
 
 extern struct workqueue_struct *bcache_wq;
+extern struct workqueue_struct *bch_journal_wq;
 extern const char * const bch_cache_modes[];
 extern struct mutex bch_register_lock;
 extern struct list_head bch_cache_sets;

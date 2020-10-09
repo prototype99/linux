@@ -87,7 +87,6 @@ static const struct vm_operations_struct f2fs_file_vm_ops = {
 	.fault		= filemap_fault,
 	.map_pages	= filemap_map_pages,
 	.page_mkwrite	= f2fs_vm_page_mkwrite,
-	.remap_pages	= generic_file_remap_pages,
 };
 
 static int get_parent_ino(struct inode *inode, nid_t *pino)
@@ -460,6 +459,11 @@ int f2fs_getattr(struct vfsmount *mnt,
 	struct inode *inode = dentry->d_inode;
 	generic_fillattr(inode, stat);
 	stat->blocks <<= 3;
+
+	/* we need to show initial sectors used for inline_data/dentries */
+	if (S_ISREG(inode->i_mode) && f2fs_has_inline_data(inode))
+		stat->blocks += (stat->size + 511) >> 9;
+
 	return 0;
 }
 
@@ -500,7 +504,7 @@ int f2fs_setattr(struct dentry *dentry, struct iattr *attr)
 	struct f2fs_inode_info *fi = F2FS_I(inode);
 	int err;
 
-	err = inode_change_ok(inode, attr);
+	err = setattr_prepare(dentry, attr);
 	if (err)
 		return err;
 

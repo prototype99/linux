@@ -2692,6 +2692,7 @@ brcmf_cfg80211_escan_handler(struct brcmf_if *ifp,
 	s32 status;
 	s32 err = 0;
 	struct brcmf_escan_result_le *escan_result_le;
+	u32 escan_buflen;
 	struct brcmf_bss_info_le *bss_info_le;
 	struct brcmf_bss_info_le *bss = NULL;
 	u32 bi_length;
@@ -2708,9 +2709,21 @@ brcmf_cfg80211_escan_handler(struct brcmf_if *ifp,
 
 	if (status == BRCMF_E_STATUS_PARTIAL) {
 		brcmf_dbg(SCAN, "ESCAN Partial result\n");
+		if (e->datalen < sizeof(*escan_result_le)) {
+			brcmf_err("invalid event data length\n");
+			goto exit;
+		}
 		escan_result_le = (struct brcmf_escan_result_le *) data;
 		if (!escan_result_le) {
 			brcmf_err("Invalid escan result (NULL pointer)\n");
+			goto exit;
+		}
+		escan_buflen = le32_to_cpu(escan_result_le->buflen);
+		if (escan_buflen > WL_ESCAN_BUF_SIZE ||
+		    escan_buflen > e->datalen ||
+		    escan_buflen < sizeof(*escan_result_le)) {
+			brcmf_err("Invalid escan buffer length: %d\n",
+				  escan_buflen);
 			goto exit;
 		}
 		if (le16_to_cpu(escan_result_le->bss_count) != 1) {
@@ -2729,9 +2742,8 @@ brcmf_cfg80211_escan_handler(struct brcmf_if *ifp,
 		}
 
 		bi_length = le32_to_cpu(bss_info_le->length);
-		if (bi_length != (le32_to_cpu(escan_result_le->buflen) -
-					WL_ESCAN_RESULTS_FIXED_SIZE)) {
-			brcmf_err("Invalid bss_info length %d: ignoring\n",
+		if (bi_length != escan_buflen -	WL_ESCAN_RESULTS_FIXED_SIZE) {
+			brcmf_err("Ignoring invalid bss_info length: %d\n",
 				  bi_length);
 			goto exit;
 		}
@@ -3021,8 +3033,14 @@ brcmf_notify_sched_scan_results(struct brcmf_if *ifp,
 	struct brcmf_pno_scanresults_le *pfn_result;
 	u32 result_count;
 	u32 status;
+	u32 datalen;
 
 	brcmf_dbg(SCAN, "Enter\n");
+
+	if (e->datalen < (sizeof(*pfn_result) + sizeof(*netinfo))) {
+		brcmf_dbg(SCAN, "Event data to small. Ignore\n");
+		return 0;
+	}
 
 	if (e->event_code == BRCMF_E_PFN_NET_LOST) {
 		brcmf_dbg(SCAN, "PFN NET LOST event. Do Nothing\n");
@@ -3042,6 +3060,14 @@ brcmf_notify_sched_scan_results(struct brcmf_if *ifp,
 	if (result_count > 0) {
 		int i;
 
+		data += sizeof(struct brcmf_pno_scanresults_le);
+		netinfo_start = (struct brcmf_pno_net_info_le *)data;
+		datalen = e->datalen - ((void *)netinfo_start - (void *)pfn_result);
+		if (datalen < result_count * sizeof(*netinfo)) {
+			brcmf_err("insufficient event data\n");
+			goto out_err;
+		}
+
 		request = kzalloc(sizeof(*request), GFP_KERNEL);
 		ssid = kcalloc(result_count, sizeof(*ssid), GFP_KERNEL);
 		channel = kcalloc(result_count, sizeof(*channel), GFP_KERNEL);
@@ -3051,9 +3077,6 @@ brcmf_notify_sched_scan_results(struct brcmf_if *ifp,
 		}
 
 		request->wiphy = wiphy;
-		data += sizeof(struct brcmf_pno_scanresults_le);
-		netinfo_start = (struct brcmf_pno_net_info_le *)data;
-
 		for (i = 0; i < result_count; i++) {
 			netinfo = &netinfo_start[i];
 			if (!netinfo) {
@@ -3063,6 +3086,8 @@ brcmf_notify_sched_scan_results(struct brcmf_if *ifp,
 				goto out_err;
 			}
 
+			if (netinfo->SSID_len > IEEE80211_MAX_SSID_LEN)
+				netinfo->SSID_len = IEEE80211_MAX_SSID_LEN;
 			brcmf_dbg(SCAN, "SSID:%s Channel:%d\n",
 				  netinfo->SSID, netinfo->channel);
 			memcpy(ssid[i].ssid, netinfo->SSID, netinfo->SSID_len);
@@ -3822,7 +3847,7 @@ brcmf_cfg80211_start_ap(struct wiphy *wiphy, struct net_device *ndev,
 				(u8 *)&settings->beacon.head[ie_offset],
 				settings->beacon.head_len - ie_offset,
 				WLAN_EID_SSID);
-		if (!ssid_ie)
+		if (!ssid_ie || ssid_ie->len > IEEE80211_MAX_SSID_LEN)
 			return -EINVAL;
 
 		memcpy(ssid_le.SSID, ssid_ie->data, ssid_ie->len);
@@ -4119,6 +4144,11 @@ brcmf_cfg80211_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 		cfg80211_mgmt_tx_status(wdev, *cookie, buf, len, true,
 					GFP_KERNEL);
 	} else if (ieee80211_is_action(mgmt->frame_control)) {
+		if (len > BRCMF_FIL_ACTION_FRAME_SIZE + DOT11_MGMT_HDR_LEN) {
+			brcmf_err("invalid action frame length\n");
+			err = -EINVAL;
+			goto exit;
+		}
 		af_params = kzalloc(sizeof(*af_params), GFP_KERNEL);
 		if (af_params == NULL) {
 			brcmf_err("unable to allocate frame\n");
@@ -5625,16 +5655,15 @@ enum nl80211_iftype brcmf_cfg80211_get_iftype(struct brcmf_if *ifp)
 	return wdev->iftype;
 }
 
-u32 wl_get_vif_state_all(struct brcmf_cfg80211_info *cfg, unsigned long state)
+bool brcmf_get_vif_state_any(struct brcmf_cfg80211_info *cfg, unsigned long state)
 {
 	struct brcmf_cfg80211_vif *vif;
-	bool result = 0;
 
 	list_for_each_entry(vif, &cfg->vif_list, list) {
 		if (test_bit(state, &vif->sme_state))
-			result++;
+			return true;
 	}
-	return result;
+	return false;
 }
 
 static inline bool vif_event_equals(struct brcmf_cfg80211_vif_event *event,

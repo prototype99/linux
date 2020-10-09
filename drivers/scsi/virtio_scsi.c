@@ -500,9 +500,11 @@ static void virtio_scsi_init_hdr_pi(struct virtio_scsi_cmd_req_pi *cmd_pi,
 	bi = blk_get_integrity(rq->rq_disk);
 
 	if (sc->sc_data_direction == DMA_TO_DEVICE)
-		cmd_pi->pi_bytesout = blk_rq_sectors(rq) * bi->tuple_size;
+		cmd_pi->pi_bytesout = bio_integrity_bytes(bi,
+							blk_rq_sectors(rq));
 	else if (sc->sc_data_direction == DMA_FROM_DEVICE)
-		cmd_pi->pi_bytesin = blk_rq_sectors(rq) * bi->tuple_size;
+		cmd_pi->pi_bytesin = bio_integrity_bytes(bi,
+							blk_rq_sectors(rq));
 }
 
 static int virtscsi_queuecommand(struct virtio_scsi *vscsi,
@@ -629,7 +631,6 @@ static int virtscsi_device_reset(struct scsi_cmnd *sc)
 		return FAILED;
 
 	memset(cmd, 0, sizeof(*cmd));
-	cmd->sc = sc;
 	cmd->req.tmf = (struct virtio_scsi_ctrl_tmf_req){
 		.type = VIRTIO_SCSI_T_TMF,
 		.subtype = VIRTIO_SCSI_T_TMF_LOGICAL_UNIT_RESET,
@@ -652,7 +653,6 @@ static int virtscsi_abort(struct scsi_cmnd *sc)
 		return FAILED;
 
 	memset(cmd, 0, sizeof(*cmd));
-	cmd->sc = sc;
 	cmd->req.tmf = (struct virtio_scsi_ctrl_tmf_req){
 		.type = VIRTIO_SCSI_T_TMF,
 		.subtype = VIRTIO_SCSI_T_TMF_ABORT_TASK,
@@ -686,6 +686,16 @@ static void virtscsi_target_destroy(struct scsi_target *starget)
 	kfree(tgt);
 }
 
+/*
+ * The host guarantees to respond to each command, although I/O
+ * latencies might be higher than on bare metal.  Reset the timer
+ * unconditionally to give the host a chance to perform EH.
+ */
+static enum blk_eh_timer_return virtscsi_eh_timed_out(struct scsi_cmnd *scmnd)
+{
+	return BLK_EH_RESET_TIMER;
+}
+
 static struct scsi_host_template virtscsi_host_template_single = {
 	.module = THIS_MODULE,
 	.name = "Virtio SCSI HBA",
@@ -695,6 +705,7 @@ static struct scsi_host_template virtscsi_host_template_single = {
 	.queuecommand = virtscsi_queuecommand_single,
 	.eh_abort_handler = virtscsi_abort,
 	.eh_device_reset_handler = virtscsi_device_reset,
+	.eh_timed_out = virtscsi_eh_timed_out,
 
 	.can_queue = 1024,
 	.dma_boundary = UINT_MAX,
@@ -712,6 +723,7 @@ static struct scsi_host_template virtscsi_host_template_multi = {
 	.queuecommand = virtscsi_queuecommand_multi,
 	.eh_abort_handler = virtscsi_abort,
 	.eh_device_reset_handler = virtscsi_device_reset,
+	.eh_timed_out = virtscsi_eh_timed_out,
 
 	.can_queue = 1024,
 	.dma_boundary = UINT_MAX,

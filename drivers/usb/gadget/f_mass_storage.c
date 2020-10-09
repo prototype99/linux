@@ -219,6 +219,8 @@
 #include <linux/usb/gadget.h>
 #include <linux/usb/composite.h>
 
+#include <linux/nospec.h>
+
 #include "gadget_chips.h"
 #include "configfs.h"
 
@@ -307,8 +309,6 @@ struct fsg_common {
 	struct completion	thread_notifier;
 	struct task_struct	*thread_task;
 
-	/* Callback functions. */
-	const struct fsg_operations	*ops;
 	/* Gadget's private data. */
 	void			*private_data;
 
@@ -400,7 +400,11 @@ static int fsg_set_halt(struct fsg_dev *fsg, struct usb_ep *ep)
 /* Caller must hold fsg->lock */
 static void wakeup_thread(struct fsg_common *common)
 {
-	smp_wmb();	/* ensure the write of bh->state is complete */
+	/*
+	 * Ensure the reading of thread_wakeup_needed
+	 * and the writing of bh->state are completed
+	 */
+	smp_mb();
 	/* Tell the main thread that something has happened */
 	common->thread_wakeup_needed = 1;
 	if (common->thread_task)
@@ -621,7 +625,12 @@ static int sleep_thread(struct fsg_common *common, bool can_freeze)
 	}
 	__set_current_state(TASK_RUNNING);
 	common->thread_wakeup_needed = 0;
-	smp_rmb();	/* ensure the latest bh->state is visible */
+
+	/*
+	 * Ensure the writing of thread_wakeup_needed
+	 * and the reading of bh->state are completed
+	 */
+	smp_mb();
 	return rc;
 }
 
@@ -2489,6 +2498,8 @@ static void handle_exception(struct fsg_common *common)
 static int fsg_main_thread(void *common_)
 {
 	struct fsg_common	*common = common_;
+	struct fsg_lun		**curlun_it;
+	unsigned		i;
 
 	/*
 	 * Allow the thread to be killed by a signal, but set the signal mask
@@ -2550,22 +2561,18 @@ static int fsg_main_thread(void *common_)
 	common->thread_task = NULL;
 	spin_unlock_irq(&common->lock);
 
-	if (!common->ops || !common->ops->thread_exits
-	 || common->ops->thread_exits(common) < 0) {
-		struct fsg_lun **curlun_it = common->luns;
-		unsigned i = common->nluns;
+	/* Eject media from all LUNs */
+	curlun_it = common->luns;
+	i = common->nluns;
 
-		down_write(&common->filesem);
-		for (; i--; ++curlun_it) {
-			struct fsg_lun *curlun = *curlun_it;
-			if (!curlun || !fsg_lun_is_open(curlun))
-				continue;
+	down_write(&common->filesem);
+	for (; i--; ++curlun_it) {
+		struct fsg_lun *curlun = *curlun_it;
 
+		if (curlun && fsg_lun_is_open(curlun))
 			fsg_lun_close(curlun);
-			curlun->unit_attention_data = SS_MEDIUM_NOT_PRESENT;
-		}
-		up_write(&common->filesem);
 	}
+	up_write(&common->filesem);
 
 	/* Let fsg_unbind() know the thread has exited */
 	complete_and_exit(&common->thread_notifier, 0);
@@ -2819,7 +2826,7 @@ int fsg_common_set_nluns(struct fsg_common *common, int nluns)
 		return -EINVAL;
 	}
 
-	curlun = kcalloc(nluns, sizeof(*curlun), GFP_KERNEL);
+	curlun = kcalloc(FSG_MAX_LUNS, sizeof(*curlun), GFP_KERNEL);
 	if (unlikely(!curlun))
 		return -ENOMEM;
 
@@ -2829,18 +2836,9 @@ int fsg_common_set_nluns(struct fsg_common *common, int nluns)
 	common->luns = curlun;
 	common->nluns = nluns;
 
-	pr_info("Number of LUNs=%d\n", common->nluns);
-
 	return 0;
 }
 EXPORT_SYMBOL_GPL(fsg_common_set_nluns);
-
-void fsg_common_set_ops(struct fsg_common *common,
-			const struct fsg_operations *ops)
-{
-	common->ops = ops;
-}
-EXPORT_SYMBOL_GPL(fsg_common_set_ops);
 
 void fsg_common_free_buffers(struct fsg_common *common)
 {
@@ -3348,6 +3346,7 @@ static struct config_group *fsg_lun_make(struct config_group *group,
 	fsg_opts = to_fsg_opts(&group->cg_item);
 	if (num >= FSG_MAX_LUNS)
 		return ERR_PTR(-ERANGE);
+	num = array_index_nospec(num, FSG_MAX_LUNS);
 
 	mutex_lock(&fsg_opts->lock);
 	if (fsg_opts->refcnt || fsg_opts->common->luns[num]) {
@@ -3604,14 +3603,26 @@ static struct usb_function *fsg_alloc(struct usb_function_instance *fi)
 	struct fsg_opts *opts = fsg_opts_from_func_inst(fi);
 	struct fsg_common *common = opts->common;
 	struct fsg_dev *fsg;
+	unsigned nluns, i;
 
 	fsg = kzalloc(sizeof(*fsg), GFP_KERNEL);
 	if (unlikely(!fsg))
 		return ERR_PTR(-ENOMEM);
 
 	mutex_lock(&opts->lock);
+	if (!opts->refcnt) {
+		for (nluns = i = 0; i < FSG_MAX_LUNS; ++i)
+			if (common->luns[i])
+				nluns = i + 1;
+		if (!nluns)
+			pr_warn("No LUNS defined, continuing anyway\n");
+		else
+			common->nluns = nluns;
+		pr_info("Number of LUNs=%u\n", common->nluns);
+	}
 	opts->refcnt++;
 	mutex_unlock(&opts->lock);
+
 	fsg->function.name	= FSG_DRIVER_DESC;
 	fsg->function.bind	= fsg_bind;
 	fsg->function.unbind	= fsg_unbind;

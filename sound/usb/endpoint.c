@@ -353,8 +353,10 @@ static void snd_complete_urb(struct urb *urb)
 	if (unlikely(urb->status == -ENOENT ||		/* unlinked */
 		     urb->status == -ENODEV ||		/* device removed */
 		     urb->status == -ECONNRESET ||	/* unlinked */
-		     urb->status == -ESHUTDOWN ||	/* device disabled */
-		     ep->chip->shutdown))		/* device disconnected */
+		     urb->status == -ESHUTDOWN))	/* device disabled */
+		goto exit_clear;
+	/* device disconnected */
+	if (unlikely(atomic_read(&ep->chip->shutdown)))
 		goto exit_clear;
 
 	if (usb_pipeout(ep->pipe)) {
@@ -375,6 +377,9 @@ static void snd_complete_urb(struct urb *urb)
 		}
 
 		prepare_outbound_urb(ep, ctx);
+		/* can be stopped during prepare callback */
+		if (unlikely(!test_bit(EP_FLAG_RUNNING, &ep->flags)))
+			goto exit_clear;
 	} else {
 		retire_inbound_urb(ep, ctx);
 		/* can be stopped during retire callback */
@@ -410,6 +415,9 @@ exit_clear:
  *
  * New endpoints will be added to chip->ep_list and must be freed by
  * calling snd_usb_endpoint_free().
+ *
+ * For SND_USB_ENDPOINT_TYPE_SYNC, the caller needs to guarantee that
+ * bNumEndpoints > 1 beforehand.
  */
 struct snd_usb_endpoint *snd_usb_add_endpoint(struct snd_usb_audio *chip,
 					      struct usb_host_interface *alts,
@@ -526,7 +534,7 @@ static int deactivate_urbs(struct snd_usb_endpoint *ep, bool force)
 {
 	unsigned int i;
 
-	if (!force && ep->chip->shutdown) /* to be sure... */
+	if (!force && atomic_read(&ep->chip->shutdown)) /* to be sure... */
 		return -EBADFD;
 
 	clear_bit(EP_FLAG_RUNNING, &ep->flags);
@@ -865,7 +873,7 @@ int snd_usb_endpoint_start(struct snd_usb_endpoint *ep, bool can_sleep)
 	int err;
 	unsigned int i;
 
-	if (ep->chip->shutdown)
+	if (atomic_read(&ep->chip->shutdown))
 		return -EBADFD;
 
 	/* already running? */

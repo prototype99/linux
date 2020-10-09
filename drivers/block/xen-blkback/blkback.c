@@ -350,8 +350,8 @@ static void purge_persistent_gnt(struct xen_blkif *blkif)
 		return;
 	}
 
-	if (work_pending(&blkif->persistent_purge_work)) {
-		pr_alert_ratelimited(DRV_PFX "Scheduled work from previous purge is still pending, cannot purge list\n");
+	if (work_busy(&blkif->persistent_purge_work)) {
+		pr_alert_ratelimited(DRV_PFX "Scheduled work from previous purge is still busy, cannot purge list\n");
 		return;
 	}
 
@@ -763,6 +763,7 @@ again:
 			BUG_ON(new_map_idx >= segs_to_map);
 			if (unlikely(map[new_map_idx].status != 0)) {
 				pr_debug(DRV_PFX "invalid buffer -- could not remap it\n");
+				put_free_pages(blkif, &pages[seg_idx]->page, 1);
 				pages[seg_idx]->handle = BLKBACK_INVALID_HANDLE;
 				ret |= 1;
 				goto next;
@@ -824,6 +825,8 @@ next:
 out_of_memory:
 	pr_alert(DRV_PFX "%s: out of memory\n", __func__);
 	put_free_pages(blkif, pages_to_gnt, segs_to_map);
+	for (i = last_map; i < num; i++)
+		pages[i]->handle = BLKBACK_INVALID_HANDLE;
 	return -ENOMEM;
 }
 
@@ -860,6 +863,8 @@ static int xen_blkbk_parse_indirect(struct blkif_request *req,
 		goto unmap;
 
 	for (n = 0, i = 0; n < nseg; n++) {
+		uint8_t first_sect, last_sect;
+
 		if ((n % SEGS_PER_INDIRECT_FRAME) == 0) {
 			/* Map indirect segments */
 			if (segments)
@@ -867,15 +872,18 @@ static int xen_blkbk_parse_indirect(struct blkif_request *req,
 			segments = kmap_atomic(pages[n/SEGS_PER_INDIRECT_FRAME]->page);
 		}
 		i = n % SEGS_PER_INDIRECT_FRAME;
+
 		pending_req->segments[n]->gref = segments[i].gref;
-		seg[n].nsec = segments[i].last_sect -
-			segments[i].first_sect + 1;
-		seg[n].offset = (segments[i].first_sect << 9);
-		if ((segments[i].last_sect >= (PAGE_SIZE >> 9)) ||
-		    (segments[i].last_sect < segments[i].first_sect)) {
+
+		first_sect = ACCESS_ONCE(segments[i].first_sect);
+		last_sect = ACCESS_ONCE(segments[i].last_sect);
+		if (last_sect >= (PAGE_SIZE >> 9) || last_sect < first_sect) {
 			rc = -EINVAL;
 			goto unmap;
 		}
+
+		seg[n].nsec = last_sect - first_sect + 1;
+		seg[n].offset = first_sect << 9;
 		preq->nr_sects += seg[n].nsec;
 	}
 
@@ -1340,33 +1348,34 @@ static int dispatch_rw_block_io(struct xen_blkif *blkif,
 static void make_response(struct xen_blkif *blkif, u64 id,
 			  unsigned short op, int st)
 {
-	struct blkif_response  resp;
+	struct blkif_response *resp;
 	unsigned long     flags;
 	union blkif_back_rings *blk_rings = &blkif->blk_rings;
 	int notify;
-
-	resp.id        = id;
-	resp.operation = op;
-	resp.status    = st;
 
 	spin_lock_irqsave(&blkif->blk_ring_lock, flags);
 	/* Place on the response ring for the relevant domain. */
 	switch (blkif->blk_protocol) {
 	case BLKIF_PROTOCOL_NATIVE:
-		memcpy(RING_GET_RESPONSE(&blk_rings->native, blk_rings->native.rsp_prod_pvt),
-		       &resp, sizeof(resp));
+		resp = RING_GET_RESPONSE(&blk_rings->native,
+					 blk_rings->native.rsp_prod_pvt);
 		break;
 	case BLKIF_PROTOCOL_X86_32:
-		memcpy(RING_GET_RESPONSE(&blk_rings->x86_32, blk_rings->x86_32.rsp_prod_pvt),
-		       &resp, sizeof(resp));
+		resp = RING_GET_RESPONSE(&blk_rings->x86_32,
+					 blk_rings->x86_32.rsp_prod_pvt);
 		break;
 	case BLKIF_PROTOCOL_X86_64:
-		memcpy(RING_GET_RESPONSE(&blk_rings->x86_64, blk_rings->x86_64.rsp_prod_pvt),
-		       &resp, sizeof(resp));
+		resp = RING_GET_RESPONSE(&blk_rings->x86_64,
+					 blk_rings->x86_64.rsp_prod_pvt);
 		break;
 	default:
 		BUG();
 	}
+
+	resp->id        = id;
+	resp->operation = op;
+	resp->status    = st;
+
 	blk_rings->common.rsp_prod_pvt++;
 	RING_PUSH_RESPONSES_AND_CHECK_NOTIFY(&blk_rings->common, notify);
 	spin_unlock_irqrestore(&blkif->blk_ring_lock, flags);

@@ -57,6 +57,7 @@ struct virtio_ccw_device {
 	int err;
 	wait_queue_head_t wait_q;
 	spinlock_t lock;
+	struct mutex io_lock; /* Serializes I/O requests */
 	struct list_head virtqueues;
 	unsigned long indicators;
 	unsigned long indicators2;
@@ -64,6 +65,7 @@ struct virtio_ccw_device {
 	bool is_thinint;
 	bool going_away;
 	bool device_lost;
+	unsigned int config_ready;
 	void *airq_info;
 };
 
@@ -256,6 +258,8 @@ static void virtio_ccw_drop_indicators(struct virtio_ccw_device *vcdev)
 {
 	struct virtio_ccw_vq_info *info;
 
+	if (!vcdev->airq_info)
+		return;
 	list_for_each_entry(info, &vcdev->virtqueues, node)
 		drop_airq_indicator(info->vq, vcdev->airq_info);
 }
@@ -281,6 +285,7 @@ static int ccw_io_helper(struct virtio_ccw_device *vcdev,
 	unsigned long flags;
 	int flag = intparm & VIRTIO_CCW_INTPARM_MASK;
 
+	mutex_lock(&vcdev->io_lock);
 	do {
 		spin_lock_irqsave(get_ccwdev_lock(vcdev->cdev), flags);
 		ret = ccw_device_start(vcdev->cdev, ccw, intparm, 0, 0);
@@ -293,7 +298,9 @@ static int ccw_io_helper(struct virtio_ccw_device *vcdev,
 		cpu_relax();
 	} while (ret == -EBUSY);
 	wait_event(vcdev->wait_q, doing_io(vcdev, flag) == 0);
-	return ret ? ret : vcdev->err;
+	ret = ret ? ret : vcdev->err;
+	mutex_unlock(&vcdev->io_lock);
+	return ret;
 }
 
 static void virtio_ccw_drop_indicator(struct virtio_ccw_device *vcdev,
@@ -381,7 +388,7 @@ static int virtio_ccw_read_vq_conf(struct virtio_ccw_device *vcdev,
 	ccw->count = sizeof(struct vq_config_block);
 	ccw->cda = (__u32)(unsigned long)(vcdev->config_block);
 	ccw_io_helper(vcdev, ccw, VIRTIO_CCW_DOING_READ_VQ_CONF);
-	return vcdev->config_block->num;
+	return vcdev->config_block->num ?: -ENOENT;
 }
 
 static void virtio_ccw_del_vq(struct virtqueue *vq, struct ccw1 *ccw)
@@ -740,6 +747,7 @@ static void virtio_ccw_get_config(struct virtio_device *vdev,
 	int ret;
 	struct ccw1 *ccw;
 	void *config_area;
+	unsigned long flags;
 
 	ccw = kzalloc(sizeof(*ccw), GFP_DMA | GFP_KERNEL);
 	if (!ccw)
@@ -758,8 +766,13 @@ static void virtio_ccw_get_config(struct virtio_device *vdev,
 	if (ret)
 		goto out_free;
 
-	memcpy(vcdev->config, config_area, sizeof(vcdev->config));
-	memcpy(buf, &vcdev->config[offset], len);
+	spin_lock_irqsave(&vcdev->lock, flags);
+	memcpy(vcdev->config, config_area, offset + len);
+	if (vcdev->config_ready < offset + len)
+		vcdev->config_ready = offset + len;
+	spin_unlock_irqrestore(&vcdev->lock, flags);
+	if (buf)
+		memcpy(buf, config_area + offset, len);
 
 out_free:
 	kfree(config_area);
@@ -773,6 +786,7 @@ static void virtio_ccw_set_config(struct virtio_device *vdev,
 	struct virtio_ccw_device *vcdev = to_vc_device(vdev);
 	struct ccw1 *ccw;
 	void *config_area;
+	unsigned long flags;
 
 	ccw = kzalloc(sizeof(*ccw), GFP_DMA | GFP_KERNEL);
 	if (!ccw)
@@ -782,9 +796,14 @@ static void virtio_ccw_set_config(struct virtio_device *vdev,
 	if (!config_area)
 		goto out_free;
 
+	/* Make sure we don't overwrite fields. */
+	if (vcdev->config_ready < offset)
+		virtio_ccw_get_config(vdev, 0, NULL, offset);
+	spin_lock_irqsave(&vcdev->lock, flags);
 	memcpy(&vcdev->config[offset], buf, len);
 	/* Write the config area to the host. */
 	memcpy(config_area, vcdev->config, sizeof(vcdev->config));
+	spin_unlock_irqrestore(&vcdev->lock, flags);
 	ccw->cmd_code = CCW_CMD_WRITE_CONF;
 	ccw->flags = 0;
 	ccw->count = offset + len;
@@ -1073,6 +1092,7 @@ static int virtio_ccw_online(struct ccw_device *cdev)
 	init_waitqueue_head(&vcdev->wait_q);
 	INIT_LIST_HEAD(&vcdev->virtqueues);
 	spin_lock_init(&vcdev->lock);
+	mutex_init(&vcdev->io_lock);
 
 	spin_lock_irqsave(get_ccwdev_lock(cdev), flags);
 	dev_set_drvdata(&cdev->dev, vcdev);

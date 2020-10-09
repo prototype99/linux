@@ -280,7 +280,11 @@ int bcmgenet_mii_config(struct net_device *dev)
 		else
 			phy_name = "external RGMII (TX delay)";
 		reg = bcmgenet_ext_readl(priv, EXT_RGMII_OOB_CTRL);
-		reg |= RGMII_MODE_EN | id_mode_dis;
+		reg |= id_mode_dis;
+		if (GENET_IS_V1(priv) || GENET_IS_V2(priv) || GENET_IS_V3(priv))
+			reg |= RGMII_MODE_EN_V123;
+		else
+			reg |= RGMII_MODE_EN;
 		bcmgenet_ext_writel(priv, reg, EXT_RGMII_OOB_CTRL);
 		bcmgenet_sys_writel(priv,
 				PORT_MODE_EXT_GPHY, SYS_PORT_CTRL);
@@ -410,7 +414,7 @@ static int bcmgenet_mii_of_init(struct bcmgenet_priv *priv)
 	if (!compat)
 		return -ENOMEM;
 
-	mdio_dn = of_find_compatible_node(dn, NULL, compat);
+	mdio_dn = of_get_compatible_child(dn, compat);
 	kfree(compat);
 	if (!mdio_dn) {
 		dev_err(kdev, "unable to find MDIO bus node\n");

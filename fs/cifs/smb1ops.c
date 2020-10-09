@@ -104,6 +104,7 @@ cifs_find_mid(struct TCP_Server_Info *server, char *buffer)
 		if (compare_mid(mid->mid, buf) &&
 		    mid->mid_state == MID_REQUEST_SUBMITTED &&
 		    le16_to_cpu(mid->command) == buf->Command) {
+			kref_get(&mid->refcount);
 			spin_unlock(&GlobalMid_Lock);
 			return mid;
 		}
@@ -179,6 +180,9 @@ cifs_get_next_mid(struct TCP_Server_Info *server)
 	/* we do not want to loop forever */
 	last_mid = cur_mid;
 	cur_mid++;
+	/* avoid 0xFFFF MID */
+	if (cur_mid == 0xffff)
+		cur_mid++;
 
 	/*
 	 * This nested loop looks more expensive than it is.
@@ -586,7 +590,7 @@ cifs_query_path_info(const unsigned int xid, struct cifs_tcon *tcon,
 		tmprc = CIFS_open(xid, &oparms, &oplock, NULL);
 		if (tmprc == -EOPNOTSUPP)
 			*symlink = true;
-		else
+		else if (tmprc == 0)
 			CIFSSMBClose(xid, tcon, fid.netfid);
 	}
 
@@ -856,8 +860,13 @@ cifs_query_dir_first(const unsigned int xid, struct cifs_tcon *tcon,
 		     struct cifs_fid *fid, __u16 search_flags,
 		     struct cifs_search_info *srch_inf)
 {
-	return CIFSFindFirst(xid, tcon, path, cifs_sb,
-			     &fid->netfid, search_flags, srch_inf, true);
+	int rc;
+
+	rc = CIFSFindFirst(xid, tcon, path, cifs_sb,
+			   &fid->netfid, search_flags, srch_inf, true);
+	if (rc)
+		cifs_dbg(FYI, "find first failed=%d\n", rc);
+	return rc;
 }
 
 static int
@@ -1009,6 +1018,21 @@ cifs_is_read_op(__u32 oplock)
 	return oplock == OPLOCK_READ;
 }
 
+static bool
+cifs_dir_needs_close(struct cifsFileInfo *cfile)
+{
+	return !cfile->srch_inf.endOfSearch && !cfile->invalidHandle;
+}
+
+static bool
+cifs_can_echo(struct TCP_Server_Info *server)
+{
+	if (server->tcpStatus == CifsGood)
+		return true;
+
+	return false;
+}
+
 struct smb_version_operations smb1_operations = {
 	.send_cancel = send_nt_cancel,
 	.compare_fids = cifs_compare_fids,
@@ -1042,6 +1066,7 @@ struct smb_version_operations smb1_operations = {
 	.get_dfs_refer = CIFSGetDFSRefer,
 	.qfs_tcon = cifs_qfs_tcon,
 	.is_path_accessible = cifs_is_path_accessible,
+	.can_echo = cifs_can_echo,
 	.query_path_info = cifs_query_path_info,
 	.query_file_info = cifs_query_file_info,
 	.get_srv_inum = cifs_get_srv_inum,
@@ -1078,6 +1103,7 @@ struct smb_version_operations smb1_operations = {
 	.query_mf_symlink = cifs_query_mf_symlink,
 	.create_mf_symlink = cifs_create_mf_symlink,
 	.is_read_op = cifs_is_read_op,
+	.dir_needs_close = cifs_dir_needs_close,
 #ifdef CONFIG_CIFS_XATTR
 	.query_all_EAs = CIFSSMBQAllEAs,
 	.set_EA = CIFSSMBSetEA,

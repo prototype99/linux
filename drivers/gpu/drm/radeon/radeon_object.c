@@ -91,6 +91,8 @@ static void radeon_ttm_bo_destroy(struct ttm_buffer_object *tbo)
 	mutex_unlock(&bo->rdev->gem.mutex);
 	radeon_bo_clear_surface_reg(bo);
 	radeon_bo_clear_va(bo);
+	if (bo->gem_base.import_attach)
+		drm_prime_gem_destroy(&bo->gem_base, bo->tbo.sg);
 	drm_gem_object_release(&bo->gem_base);
 	kfree(bo);
 }
@@ -357,6 +359,10 @@ void radeon_bo_force_delete(struct radeon_device *rdev)
 
 int radeon_bo_init(struct radeon_device *rdev)
 {
+	/* reserve PAT memory space to WC for VRAM */
+	arch_io_reserve_memtype_wc(rdev->mc.aper_base,
+				   rdev->mc.aper_size);
+
 	/* Add an MTRR for the VRAM */
 	if (!rdev->fastfb_working) {
 		rdev->mc.vram_mtrr = arch_phys_wc_add(rdev->mc.aper_base,
@@ -374,6 +380,7 @@ void radeon_bo_fini(struct radeon_device *rdev)
 {
 	radeon_ttm_fini(rdev);
 	arch_phys_wc_del(rdev->mc.vram_mtrr);
+	arch_io_free_memtype_wc(rdev->mc.aper_base, rdev->mc.aper_size);
 }
 
 /* Returns how many bytes TTM can move per IB.

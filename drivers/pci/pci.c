@@ -657,19 +657,6 @@ void pci_update_current_state(struct pci_dev *dev, pci_power_t state)
 }
 
 /**
- * pci_power_up - Put the given device into D0 forcibly
- * @dev: PCI device to power up
- */
-void pci_power_up(struct pci_dev *dev)
-{
-	if (platform_pci_power_manageable(dev))
-		platform_pci_set_power_state(dev, PCI_D0);
-
-	pci_raw_set_power_state(dev, PCI_D0);
-	pci_update_current_state(dev, PCI_D0);
-}
-
-/**
  * pci_platform_power_transition - Use platform to change device power state
  * @dev: PCI device to handle.
  * @state: State to put the device into.
@@ -839,16 +826,21 @@ int pci_set_power_state(struct pci_dev *dev, pci_power_t state)
 
 	if (!__pci_complete_power_transition(dev, state))
 		error = 0;
-	/*
-	 * When aspm_policy is "powersave" this call ensures
-	 * that ASPM is configured.
-	 */
-	if (!error && dev->bus->self)
-		pcie_aspm_powersave_config_link(dev->bus->self);
 
 	return error;
 }
 EXPORT_SYMBOL(pci_set_power_state);
+
+/**
+ * pci_power_up - Put the given device into D0 forcibly
+ * @dev: PCI device to power up
+ */
+void pci_power_up(struct pci_dev *dev)
+{
+	__pci_start_power_transition(dev, PCI_D0);
+	pci_raw_set_power_state(dev, PCI_D0);
+	pci_update_current_state(dev, PCI_D0);
+}
 
 /**
  * pci_choose_state - Choose the power state of a PCI device
@@ -1020,12 +1012,12 @@ int pci_save_state(struct pci_dev *dev)
 EXPORT_SYMBOL(pci_save_state);
 
 static void pci_restore_config_dword(struct pci_dev *pdev, int offset,
-				     u32 saved_val, int retry)
+				     u32 saved_val, int retry, bool force)
 {
 	u32 val;
 
 	pci_read_config_dword(pdev, offset, &val);
-	if (val == saved_val)
+	if (!force && val == saved_val)
 		return;
 
 	for (;;) {
@@ -1044,25 +1036,36 @@ static void pci_restore_config_dword(struct pci_dev *pdev, int offset,
 }
 
 static void pci_restore_config_space_range(struct pci_dev *pdev,
-					   int start, int end, int retry)
+					   int start, int end, int retry,
+					   bool force)
 {
 	int index;
 
 	for (index = end; index >= start; index--)
 		pci_restore_config_dword(pdev, 4 * index,
 					 pdev->saved_config_space[index],
-					 retry);
+					 retry, force);
 }
 
 static void pci_restore_config_space(struct pci_dev *pdev)
 {
 	if (pdev->hdr_type == PCI_HEADER_TYPE_NORMAL) {
-		pci_restore_config_space_range(pdev, 10, 15, 0);
+		pci_restore_config_space_range(pdev, 10, 15, 0, false);
 		/* Restore BARs before the command register. */
-		pci_restore_config_space_range(pdev, 4, 9, 10);
-		pci_restore_config_space_range(pdev, 0, 3, 0);
+		pci_restore_config_space_range(pdev, 4, 9, 10, false);
+		pci_restore_config_space_range(pdev, 0, 3, 0, false);
+	} else if (pdev->hdr_type == PCI_HEADER_TYPE_BRIDGE) {
+		pci_restore_config_space_range(pdev, 12, 15, 0, false);
+
+		/*
+		 * Force rewriting of prefetch registers to avoid S3 resume
+		 * issues on Intel PCI bridges that occur when these
+		 * registers are not explicitly written.
+		 */
+		pci_restore_config_space_range(pdev, 9, 11, 0, true);
+		pci_restore_config_space_range(pdev, 0, 8, 0, false);
 	} else {
-		pci_restore_config_space_range(pdev, 0, 15, 0);
+		pci_restore_config_space_range(pdev, 0, 15, 0, false);
 	}
 }
 
@@ -1195,12 +1198,18 @@ int __weak pcibios_enable_device(struct pci_dev *dev, int bars)
 static int do_pci_enable_device(struct pci_dev *dev, int bars)
 {
 	int err;
+	struct pci_dev *bridge;
 	u16 cmd;
 	u8 pin;
 
 	err = pci_set_power_state(dev, PCI_D0);
 	if (err < 0 && err != -EIO)
 		return err;
+
+	bridge = pci_upstream_bridge(dev);
+	if (bridge)
+		pcie_aspm_powersave_config_link(bridge);
+
 	err = pcibios_enable_device(dev, bars);
 	if (err < 0)
 		return err;
@@ -1669,6 +1678,13 @@ static void pci_pme_list_scan(struct work_struct *work)
 			 */
 			if (bridge && bridge->current_state != PCI_D0)
 				continue;
+			/*
+			 * If the device is in D3cold it should not be
+			 * polled either.
+			 */
+			if (pme_dev->dev->current_state == PCI_D3cold)
+				continue;
+
 			pci_pme_wakeup(pme_dev->dev, NULL);
 		} else {
 			list_del(&pme_dev->list);
@@ -1676,8 +1692,8 @@ static void pci_pme_list_scan(struct work_struct *work)
 		}
 	}
 	if (!list_empty(&pci_pme_list))
-		schedule_delayed_work(&pci_pme_work,
-				      msecs_to_jiffies(PME_TIMEOUT));
+		queue_delayed_work(system_freezable_wq, &pci_pme_work,
+				   msecs_to_jiffies(PME_TIMEOUT));
 	mutex_unlock(&pci_pme_list_mutex);
 }
 
@@ -1737,8 +1753,9 @@ void pci_pme_active(struct pci_dev *dev, bool enable)
 			mutex_lock(&pci_pme_list_mutex);
 			list_add(&pme_dev->list, &pci_pme_list);
 			if (list_is_singular(&pci_pme_list))
-				schedule_delayed_work(&pci_pme_work,
-						      msecs_to_jiffies(PME_TIMEOUT));
+				queue_delayed_work(system_freezable_wq,
+						   &pci_pme_work,
+						   msecs_to_jiffies(PME_TIMEOUT));
 			mutex_unlock(&pci_pme_list_mutex);
 		} else {
 			mutex_lock(&pci_pme_list_mutex);
@@ -1980,6 +1997,10 @@ bool pci_dev_run_wake(struct pci_dev *dev)
 		return true;
 
 	if (!dev->pme_support)
+		return false;
+
+	/* PME-capable in principle, but not from the intended sleep state */
+	if (!pci_pme_capable(dev, pci_target_state(dev)))
 		return false;
 
 	while (bus->parent) {
@@ -3241,7 +3262,8 @@ static int pci_parent_bus_reset(struct pci_dev *dev, int probe)
 {
 	struct pci_dev *pdev;
 
-	if (pci_is_root_bus(dev->bus) || dev->subordinate || !dev->bus->self)
+	if (pci_is_root_bus(dev->bus) || dev->subordinate ||
+	    !dev->bus->self || dev->dev_flags & PCI_DEV_FLAGS_NO_BUS_RESET)
 		return -ENOTTY;
 
 	list_for_each_entry(pdev, &dev->bus->devices, bus_list)
@@ -3275,7 +3297,8 @@ static int pci_dev_reset_slot_function(struct pci_dev *dev, int probe)
 {
 	struct pci_dev *pdev;
 
-	if (dev->subordinate || !dev->slot)
+	if (dev->subordinate || !dev->slot ||
+	    dev->dev_flags & PCI_DEV_FLAGS_NO_BUS_RESET)
 		return -ENOTTY;
 
 	list_for_each_entry(pdev, &dev->bus->devices, bus_list)
@@ -3527,6 +3550,20 @@ int pci_try_reset_function(struct pci_dev *dev)
 }
 EXPORT_SYMBOL_GPL(pci_try_reset_function);
 
+/* Do any devices on or below this bus prevent a bus reset? */
+static bool pci_bus_resetable(struct pci_bus *bus)
+{
+	struct pci_dev *dev;
+
+	list_for_each_entry(dev, &bus->devices, bus_list) {
+		if (dev->dev_flags & PCI_DEV_FLAGS_NO_BUS_RESET ||
+		    (dev->subordinate && !pci_bus_resetable(dev->subordinate)))
+			return false;
+	}
+
+	return true;
+}
+
 /* Lock devices from the top of the tree down */
 static void pci_bus_lock(struct pci_bus *bus)
 {
@@ -3575,6 +3612,22 @@ unlock:
 		pci_dev_unlock(dev);
 	}
 	return 0;
+}
+
+/* Do any devices on or below this slot prevent a bus reset? */
+static bool pci_slot_resetable(struct pci_slot *slot)
+{
+	struct pci_dev *dev;
+
+	list_for_each_entry(dev, &slot->bus->devices, bus_list) {
+		if (!dev->slot || dev->slot != slot)
+			continue;
+		if (dev->dev_flags & PCI_DEV_FLAGS_NO_BUS_RESET ||
+		    (dev->subordinate && !pci_bus_resetable(dev->subordinate)))
+			return false;
+	}
+
+	return true;
 }
 
 /* Lock devices from the top of the tree down */
@@ -3698,7 +3751,7 @@ static int pci_slot_reset(struct pci_slot *slot, int probe)
 {
 	int rc;
 
-	if (!slot)
+	if (!slot || !pci_slot_resetable(slot))
 		return -ENOTTY;
 
 	if (!probe)
@@ -3790,7 +3843,7 @@ EXPORT_SYMBOL_GPL(pci_try_reset_slot);
 
 static int pci_bus_reset(struct pci_bus *bus, int probe)
 {
-	if (!bus->self)
+	if (!bus->self || !pci_bus_resetable(bus))
 		return -ENOTTY;
 
 	if (probe)

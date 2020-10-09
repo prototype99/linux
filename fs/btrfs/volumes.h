@@ -24,6 +24,8 @@
 #include <linux/btrfs.h>
 #include "async-thread.h"
 
+#define BTRFS_MAX_DATA_CHUNK_SIZE	(10ULL * SZ_1G)
+
 #define BTRFS_STRIPE_LEN	(64 * 1024)
 
 struct buffer_head;
@@ -259,6 +261,14 @@ struct map_lookup {
 #define BTRFS_BALANCE_ARGS_DRANGE	(1ULL << 3)
 #define BTRFS_BALANCE_ARGS_VRANGE	(1ULL << 4)
 #define BTRFS_BALANCE_ARGS_LIMIT	(1ULL << 5)
+
+#define BTRFS_BALANCE_ARGS_MASK			\
+	(BTRFS_BALANCE_ARGS_PROFILES |		\
+	 BTRFS_BALANCE_ARGS_USAGE |		\
+	 BTRFS_BALANCE_ARGS_DEVID | 		\
+	 BTRFS_BALANCE_ARGS_DRANGE |		\
+	 BTRFS_BALANCE_ARGS_VRANGE |		\
+	 BTRFS_BALANCE_ARGS_LIMIT)
 
 /*
  * Profile changing flags.  When SOFT is set we won't relocate chunk if

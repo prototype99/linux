@@ -51,7 +51,7 @@ struct bio_integrity_payload *bio_integrity_alloc(struct bio *bio,
 	unsigned long idx = BIO_POOL_NONE;
 	unsigned inline_vecs;
 
-	if (!bs) {
+	if (!bs || !bs->bio_integrity_pool) {
 		bip = kmalloc(sizeof(struct bio_integrity_payload) +
 			      sizeof(struct bio_vec) * nr_vecs, gfp_mask);
 		inline_vecs = nr_vecs;
@@ -100,7 +100,7 @@ void bio_integrity_free(struct bio *bio)
 	if (bip->bip_owns_buf)
 		kfree(bip->bip_buf);
 
-	if (bs) {
+	if (bs && bs->bio_integrity_pool) {
 		if (bip->bip_slab != BIO_POOL_NONE)
 			bvec_free(bs->bvec_integrity_pool, bip->bip_vec,
 				  bip->bip_slab);
@@ -192,32 +192,6 @@ int bio_integrity_enabled(struct bio *bio)
 	return bdev_integrity_enabled(bio->bi_bdev, bio_data_dir(bio));
 }
 EXPORT_SYMBOL(bio_integrity_enabled);
-
-/**
- * bio_integrity_hw_sectors - Convert 512b sectors to hardware ditto
- * @bi:		blk_integrity profile for device
- * @sectors:	Number of 512 sectors to convert
- *
- * Description: The block layer calculates everything in 512 byte
- * sectors but integrity metadata is done in terms of the hardware
- * sector size of the storage device.  Convert the block layer sectors
- * to physical sectors.
- */
-static inline unsigned int bio_integrity_hw_sectors(struct blk_integrity *bi,
-						    unsigned int sectors)
-{
-	/* At this point there are only 512b or 4096b DIF/EPP devices */
-	if (bi->sector_size == 4096)
-		return sectors >>= 3;
-
-	return sectors;
-}
-
-static inline unsigned int bio_integrity_bytes(struct blk_integrity *bi,
-					       unsigned int sectors)
-{
-	return bio_integrity_hw_sectors(bi, sectors) * bi->tuple_size;
-}
 
 /**
  * bio_integrity_tag_size - Retrieve integrity tag space

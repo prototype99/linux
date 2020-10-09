@@ -192,7 +192,8 @@ static int usb3503_probe(struct usb3503 *hub)
 
 		clk = devm_clk_get(dev, "refclk");
 		if (IS_ERR(clk) && PTR_ERR(clk) != -ENOENT) {
-			dev_err(dev, "unable to request refclk (%d)\n", err);
+			dev_err(dev, "unable to request refclk (%ld)\n",
+					PTR_ERR(clk));
 			return PTR_ERR(clk);
 		}
 
@@ -292,6 +293,8 @@ static int usb3503_probe(struct usb3503 *hub)
 	if (gpio_is_valid(hub->gpio_reset)) {
 		err = devm_gpio_request_one(dev, hub->gpio_reset,
 				GPIOF_OUT_INIT_LOW, "usb3503 reset");
+		/* Datasheet defines a hardware reset to be at least 100us */
+		usleep_range(100, 10000);
 		if (err) {
 			dev_err(dev,
 				"unable to request GPIO %d as reset pin (%d)\n",

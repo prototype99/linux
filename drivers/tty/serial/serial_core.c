@@ -131,6 +131,7 @@ static int uart_port_startup(struct tty_struct *tty, struct uart_state *state,
 	struct uart_port *uport = state->uart_port;
 	struct tty_port *port = &state->port;
 	unsigned long page;
+	unsigned long flags = 0;
 	int retval = 0;
 
 	if (uport->type == PORT_UNKNOWN)
@@ -145,15 +146,18 @@ static int uart_port_startup(struct tty_struct *tty, struct uart_state *state,
 	 * Initialise and allocate the transmit and temporary
 	 * buffer.
 	 */
-	if (!state->xmit.buf) {
-		/* This is protected by the per port mutex */
-		page = get_zeroed_page(GFP_KERNEL);
-		if (!page)
-			return -ENOMEM;
+	page = get_zeroed_page(GFP_KERNEL);
+	if (!page)
+		return -ENOMEM;
 
+	spin_lock_irqsave(&uport->lock, flags);
+	if (!state->xmit.buf) {
 		state->xmit.buf = (unsigned char *) page;
 		uart_circ_clear(&state->xmit);
+	} else {
+		free_page(page);
 	}
+	spin_unlock_irqrestore(&uport->lock, flags);
 
 	retval = uport->ops->startup(uport);
 	if (retval == 0) {
@@ -232,6 +236,7 @@ static void uart_shutdown(struct tty_struct *tty, struct uart_state *state)
 {
 	struct uart_port *uport = state->uart_port;
 	struct tty_port *port = &state->port;
+	unsigned long flags = 0;
 
 	/*
 	 * Set the TTY IO error marker
@@ -243,6 +248,9 @@ static void uart_shutdown(struct tty_struct *tty, struct uart_state *state)
 		/*
 		 * Turn off DTR and RTS early.
 		 */
+		if (uart_console(uport) && tty)
+			uport->cons->cflag = tty->termios.c_cflag;
+
 		if (!tty || (tty->termios.c_cflag & HUPCL))
 			uart_clear_mctrl(uport, TIOCM_DTR | TIOCM_RTS);
 
@@ -259,10 +267,12 @@ static void uart_shutdown(struct tty_struct *tty, struct uart_state *state)
 	/*
 	 * Free the transmit buffer page.
 	 */
+	spin_lock_irqsave(&uport->lock, flags);
 	if (state->xmit.buf) {
 		free_page((unsigned long)state->xmit.buf);
 		state->xmit.buf = NULL;
 	}
+	spin_unlock_irqrestore(&uport->lock, flags);
 }
 
 /**
@@ -358,7 +368,7 @@ uart_get_baud_rate(struct uart_port *port, struct ktermios *termios,
 		 * The spd_hi, spd_vhi, spd_shi, spd_warp kludge...
 		 * Die! Die! Die!
 		 */
-		if (baud == 38400)
+		if (try == 0 && baud == 38400)
 			baud = altbaud;
 
 		/*
@@ -470,10 +480,12 @@ static inline int __uart_put_char(struct uart_port *port,
 	unsigned long flags;
 	int ret = 0;
 
-	if (!circ->buf)
-		return 0;
-
 	spin_lock_irqsave(&port->lock, flags);
+	if (!circ->buf) {
+		spin_unlock_irqrestore(&port->lock, flags);
+		return 0;
+	}
+
 	if (uart_circ_chars_free(circ) != 0) {
 		circ->buf[circ->head] = c;
 		circ->head = (circ->head + 1) & (UART_XMIT_SIZE - 1);
@@ -514,12 +526,14 @@ static int uart_write(struct tty_struct *tty,
 	}
 
 	port = state->uart_port;
+	spin_lock_irqsave(&port->lock, flags);
 	circ = &state->xmit;
 
-	if (!circ->buf)
+	if (!circ->buf) {
+		spin_unlock_irqrestore(&port->lock, flags);
 		return 0;
+	}
 
-	spin_lock_irqsave(&port->lock, flags);
 	while (1) {
 		c = CIRC_SPACE_TO_END(circ->head, circ->tail, UART_XMIT_SIZE);
 		if (count < c)
@@ -999,7 +1013,7 @@ static int uart_break_ctl(struct tty_struct *tty, int break_state)
 
 	mutex_lock(&port->mutex);
 
-	if (uport->type != PORT_UNKNOWN)
+	if (uport->type != PORT_UNKNOWN && uport->ops->break_ctl)
 		uport->ops->break_ctl(uport, break_state);
 
 	mutex_unlock(&port->mutex);
@@ -1527,6 +1541,16 @@ static void uart_dtr_rts(struct tty_port *port, int onoff)
 		uart_clear_mctrl(uport, TIOCM_DTR | TIOCM_RTS);
 }
 
+static int uart_install(struct tty_driver *driver, struct tty_struct *tty)
+{
+	struct uart_driver *drv = driver->driver_state;
+	struct uart_state *state = drv->state + tty->index;
+
+	tty->driver_data = state;
+
+	return tty_standard_install(driver, tty);
+}
+
 /*
  * Calls to uart_open are serialised by the tty_lock in
  *   drivers/tty/tty_io.c:tty_open()
@@ -1539,9 +1563,8 @@ static void uart_dtr_rts(struct tty_port *port, int onoff)
  */
 static int uart_open(struct tty_struct *tty, struct file *filp)
 {
-	struct uart_driver *drv = (struct uart_driver *)tty->driver->driver_state;
 	int retval, line = tty->index;
-	struct uart_state *state = drv->state + line;
+	struct uart_state *state = tty->driver_data;
 	struct tty_port *port = &state->port;
 
 	pr_debug("uart_open(%d) called\n", line);
@@ -1569,7 +1592,6 @@ static int uart_open(struct tty_struct *tty, struct file *filp)
 	 * uart_close() will decrement the driver module use count.
 	 * Any failures from here onwards should not touch the count.
 	 */
-	tty->driver_data = state;
 	state->uart_port->state = state;
 	state->port.low_latency =
 		(state->uart_port->flags & UPF_LOW_LATENCY) ? 1 : 0;
@@ -2251,6 +2273,7 @@ static void uart_poll_put_char(struct tty_driver *driver, int line, char ch)
 #endif
 
 static const struct tty_operations uart_ops = {
+	.install	= uart_install,
 	.open		= uart_open,
 	.close		= uart_close,
 	.write		= uart_write,
@@ -2616,6 +2639,7 @@ int uart_add_one_port(struct uart_driver *drv, struct uart_port *uport)
 		lockdep_set_class(&uport->lock, &port_lock_key);
 	}
 
+	tty_port_link_device(port, drv->tty_driver, uport->line);
 	uart_configure_port(drv, state, uport);
 
 	/*

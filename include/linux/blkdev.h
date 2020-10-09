@@ -284,6 +284,7 @@ struct queue_limits {
 	unsigned int		max_sectors;
 	unsigned int		max_segment_size;
 	unsigned int		physical_block_size;
+	unsigned int		logical_block_size;
 	unsigned int		alignment_offset;
 	unsigned int		io_min;
 	unsigned int		io_opt;
@@ -292,7 +293,6 @@ struct queue_limits {
 	unsigned int		discard_granularity;
 	unsigned int		discard_alignment;
 
-	unsigned short		logical_block_size;
 	unsigned short		max_segments;
 	unsigned short		max_integrity_segments;
 
@@ -447,7 +447,8 @@ struct request_queue {
 	unsigned int		sg_reserved_size;
 	int			node;
 #ifdef CONFIG_BLK_DEV_IO_TRACE
-	struct blk_trace	*blk_trace;
+	struct blk_trace __rcu	*blk_trace;
+	struct mutex		blk_trace_mutex;
 #endif
 	/*
 	 * for flush operations
@@ -461,6 +462,12 @@ struct request_queue {
 	struct list_head	flush_queue[2];
 	struct list_head	flush_data_in_flight;
 	struct request		*flush_rq;
+
+	/*
+	 * flush_rq shares tag with this rq, both can't be active
+	 * at the same time
+	 */
+	struct request		*orig_rq;
 	spinlock_t		mq_flush_lock;
 
 	struct list_head	requeue_list;
@@ -620,7 +627,7 @@ static inline void queue_flag_clear(unsigned int flag, struct request_queue *q)
 
 #define list_entry_rq(ptr)	list_entry((ptr), struct request, queuelist)
 
-#define rq_data_dir(rq)		(((rq)->cmd_flags & 1) != 0)
+#define rq_data_dir(rq)		((int)((rq)->cmd_flags & 1))
 
 /*
  * Driver can handle struct request, if it either has an old style
@@ -801,7 +808,6 @@ extern void blk_rq_set_block_pc(struct request *);
 extern void blk_requeue_request(struct request_queue *, struct request *);
 extern void blk_add_request_payload(struct request *rq, struct page *page,
 		unsigned int len);
-extern int blk_rq_check_limits(struct request_queue *q, struct request *rq);
 extern int blk_lld_busy(struct request_queue *q);
 extern int blk_rq_prep_clone(struct request *rq, struct request *rq_src,
 			     struct bio_set *bs, gfp_t gfp_mask,
@@ -923,8 +929,8 @@ static inline unsigned int blk_max_size_offset(struct request_queue *q,
 	if (!q->limits.chunk_sectors)
 		return q->limits.max_sectors;
 
-	return q->limits.chunk_sectors -
-			(offset & (q->limits.chunk_sectors - 1));
+	return min(q->limits.max_sectors, (unsigned int)(q->limits.chunk_sectors -
+			(offset & (q->limits.chunk_sectors - 1))));
 }
 
 static inline unsigned int blk_rq_get_max_sectors(struct request *rq)
@@ -1011,7 +1017,7 @@ extern void blk_queue_max_discard_sectors(struct request_queue *q,
 		unsigned int max_discard_sectors);
 extern void blk_queue_max_write_same_sectors(struct request_queue *q,
 		unsigned int max_write_same_sectors);
-extern void blk_queue_logical_block_size(struct request_queue *, unsigned short);
+extern void blk_queue_logical_block_size(struct request_queue *, unsigned int);
 extern void blk_queue_physical_block_size(struct request_queue *, unsigned int);
 extern void blk_queue_alignment_offset(struct request_queue *q,
 				       unsigned int alignment);
@@ -1140,8 +1146,7 @@ static inline bool blk_needs_flush_plug(struct task_struct *tsk)
 /*
  * tag stuff
  */
-#define blk_rq_tagged(rq) \
-	((rq)->mq_ctx || ((rq)->cmd_flags & REQ_QUEUED))
+#define blk_rq_tagged(rq)		((rq)->cmd_flags & REQ_QUEUED)
 extern int blk_queue_start_tag(struct request_queue *, struct request *);
 extern struct request *blk_queue_find_tag(struct request_queue *, int);
 extern void blk_queue_end_tag(struct request_queue *, struct request *);
@@ -1227,7 +1232,7 @@ static inline unsigned int queue_max_segment_size(struct request_queue *q)
 	return q->limits.max_segment_size;
 }
 
-static inline unsigned short queue_logical_block_size(struct request_queue *q)
+static inline unsigned queue_logical_block_size(struct request_queue *q)
 {
 	int retval = 512;
 
@@ -1237,7 +1242,7 @@ static inline unsigned short queue_logical_block_size(struct request_queue *q)
 	return retval;
 }
 
-static inline unsigned short bdev_logical_block_size(struct block_device *bdev)
+static inline unsigned int bdev_logical_block_size(struct block_device *bdev)
 {
 	return queue_logical_block_size(bdev_get_queue(bdev));
 }
@@ -1283,10 +1288,9 @@ static inline int queue_alignment_offset(struct request_queue *q)
 static inline int queue_limit_alignment_offset(struct queue_limits *lim, sector_t sector)
 {
 	unsigned int granularity = max(lim->physical_block_size, lim->io_min);
-	unsigned int alignment = (sector << 9) & (granularity - 1);
+	unsigned int alignment = sector_div(sector, granularity >> 9) << 9;
 
-	return (granularity + lim->alignment_offset - alignment)
-		& (granularity - 1);
+	return (granularity + lim->alignment_offset - alignment) % granularity;
 }
 
 static inline int bdev_alignment_offset(struct block_device *bdev)
@@ -1538,6 +1542,32 @@ queue_max_integrity_segments(struct request_queue *q)
 	return q->limits.max_integrity_segments;
 }
 
+/**
+ * bio_integrity_hw_sectors - Convert 512b sectors to hardware ditto
+ * @bi:		blk_integrity profile for device
+ * @sectors:	Number of 512 sectors to convert
+ *
+ * Description: The block layer calculates everything in 512 byte
+ * sectors but integrity metadata is done in terms of the hardware
+ * sector size of the storage device.  Convert the block layer sectors
+ * to physical sectors.
+ */
+static inline unsigned int bio_integrity_hw_sectors(struct blk_integrity *bi,
+						    unsigned int sectors)
+{
+	/* At this point there are only 512b or 4096b DIF/EPP devices */
+	if (bi->sector_size == 4096)
+		return sectors >>= 3;
+
+	return sectors;
+}
+
+static inline unsigned int bio_integrity_bytes(struct blk_integrity *bi,
+					       unsigned int sectors)
+{
+	return bio_integrity_hw_sectors(bi, sectors) * bi->tuple_size;
+}
+
 #else /* CONFIG_BLK_DEV_INTEGRITY */
 
 struct bio;
@@ -1601,6 +1631,18 @@ static inline int blk_integrity_merge_bio(struct request_queue *rq,
 	return 0;
 }
 static inline bool blk_integrity_is_initialized(struct gendisk *g)
+{
+	return 0;
+}
+
+static inline unsigned int bio_integrity_hw_sectors(struct blk_integrity *bi,
+						   unsigned int sectors)
+{
+	return 0;
+}
+
+static inline unsigned int bio_integrity_bytes(struct blk_integrity *bi,
+					       unsigned int sectors)
 {
 	return 0;
 }

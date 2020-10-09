@@ -928,6 +928,8 @@ int em28xx_start_analog_streaming(struct vb2_queue *vq, unsigned int count)
 
 	em28xx_videodbg("%s\n", __func__);
 
+	dev->v4l2->field_count = 0;
+
 	/* Make sure streaming is not already in progress for this type
 	   of filehandle (e.g. video, vbi) */
 	rc = res_get(dev, vq->type);
@@ -994,13 +996,16 @@ static void em28xx_stop_streaming(struct vb2_queue *vq)
 	}
 
 	spin_lock_irqsave(&dev->slock, flags);
+	if (dev->usb_ctl.vid_buf != NULL) {
+		vb2_buffer_done(&dev->usb_ctl.vid_buf->vb, VB2_BUF_STATE_ERROR);
+		dev->usb_ctl.vid_buf = NULL;
+	}
 	while (!list_empty(&vidq->active)) {
 		struct em28xx_buffer *buf;
 		buf = list_entry(vidq->active.next, struct em28xx_buffer, list);
 		list_del(&buf->list);
 		vb2_buffer_done(&buf->vb, VB2_BUF_STATE_ERROR);
 	}
-	dev->usb_ctl.vid_buf = NULL;
 	spin_unlock_irqrestore(&dev->slock, flags);
 }
 
@@ -1021,13 +1026,16 @@ void em28xx_stop_vbi_streaming(struct vb2_queue *vq)
 	}
 
 	spin_lock_irqsave(&dev->slock, flags);
+	if (dev->usb_ctl.vbi_buf != NULL) {
+		vb2_buffer_done(&dev->usb_ctl.vbi_buf->vb, VB2_BUF_STATE_ERROR);
+		dev->usb_ctl.vbi_buf = NULL;
+	}
 	while (!list_empty(&vbiq->active)) {
 		struct em28xx_buffer *buf;
 		buf = list_entry(vbiq->active.next, struct em28xx_buffer, list);
 		list_del(&buf->list);
 		vb2_buffer_done(&buf->vb, VB2_BUF_STATE_ERROR);
 	}
-	dev->usb_ctl.vbi_buf = NULL;
 	spin_unlock_irqrestore(&dev->slock, flags);
 }
 
@@ -1273,9 +1281,9 @@ static int vidioc_try_fmt_vid_cap(struct file *file, void *priv,
 
 	fmt = format_by_fourcc(f->fmt.pix.pixelformat);
 	if (!fmt) {
-		em28xx_videodbg("Fourcc format (%08x) invalid.\n",
-				f->fmt.pix.pixelformat);
-		return -EINVAL;
+		fmt = &format[0];
+		em28xx_videodbg("Fourcc format (%08x) invalid. Using default (%08x).\n",
+				f->fmt.pix.pixelformat, fmt->fourcc);
 	}
 
 	if (dev->board.is_em2800) {
@@ -1344,7 +1352,7 @@ static int vidioc_s_fmt_vid_cap(struct file *file, void *priv,
 	struct em28xx *dev = video_drvdata(file);
 	struct em28xx_v4l2 *v4l2 = dev->v4l2;
 
-	if (v4l2->streaming_users > 0)
+	if (vb2_is_busy(&v4l2->vb_vidq))
 		return -EBUSY;
 
 	vidioc_try_fmt_vid_cap(file, priv, f);
@@ -1972,7 +1980,7 @@ static int em28xx_v4l2_fini(struct em28xx *dev)
 	if (v4l2 == NULL)
 		return 0;
 
-	em28xx_info("Closing video extension");
+	em28xx_info("Closing video extension\n");
 
 	mutex_lock(&dev->lock);
 
@@ -2021,7 +2029,7 @@ static int em28xx_v4l2_suspend(struct em28xx *dev)
 	if (!dev->has_video)
 		return 0;
 
-	em28xx_info("Suspending video extension");
+	em28xx_info("Suspending video extension\n");
 	em28xx_stop_urbs(dev);
 	return 0;
 }
@@ -2034,7 +2042,7 @@ static int em28xx_v4l2_resume(struct em28xx *dev)
 	if (!dev->has_video)
 		return 0;
 
-	em28xx_info("Resuming video extension");
+	em28xx_info("Resuming video extension\n");
 	/* what do we do here */
 	return 0;
 }

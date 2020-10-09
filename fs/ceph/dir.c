@@ -111,7 +111,7 @@ static int fpos_cmp(loff_t l, loff_t r)
 /*
  * When possible, we try to satisfy a readdir by peeking at the
  * dcache.  We make this work by carefully ordering dentries on
- * d_u.d_child when we initially get results back from the MDS, and
+ * d_child when we initially get results back from the MDS, and
  * falling back to a "normal" sync readdir if any dentries in the dir
  * are dropped.
  *
@@ -147,11 +147,11 @@ static int __dcache_readdir(struct file *file,  struct dir_context *ctx,
 		p = parent->d_subdirs.prev;
 		dout(" initial p %p/%p\n", p->prev, p->next);
 	} else {
-		p = last->d_u.d_child.prev;
+		p = last->d_child.prev;
 	}
 
 more:
-	dentry = list_entry(p, struct dentry, d_u.d_child);
+	dentry = list_entry(p, struct dentry, d_child);
 	di = ceph_dentry(dentry);
 	while (1) {
 		dout(" p %p/%p %s d_subdirs %p/%p\n", p->prev, p->next,
@@ -174,7 +174,7 @@ more:
 		     !dentry->d_inode ? " null" : "");
 		spin_unlock(&dentry->d_lock);
 		p = p->prev;
-		dentry = list_entry(p, struct dentry, d_u.d_child);
+		dentry = list_entry(p, struct dentry, d_child);
 		di = ceph_dentry(dentry);
 	}
 
@@ -1064,6 +1064,45 @@ static int ceph_d_revalidate(struct dentry *dentry, unsigned int flags)
 			valid = 1;
 	}
 
+	if (!valid) {
+		struct ceph_mds_client *mdsc =
+			ceph_sb_to_client(dir->i_sb)->mdsc;
+		struct ceph_mds_request *req;
+		int op, err;
+		u32 mask;
+
+		op = ceph_snap(dir) == CEPH_SNAPDIR ?
+			CEPH_MDS_OP_LOOKUPSNAP : CEPH_MDS_OP_GETATTR;
+		req = ceph_mdsc_create_request(mdsc, op, USE_ANY_MDS);
+		if (!IS_ERR(req)) {
+			req->r_dentry = dget(dentry);
+			req->r_num_caps = op == CEPH_MDS_OP_GETATTR ? 1 : 2;
+
+			mask = CEPH_STAT_CAP_INODE | CEPH_CAP_AUTH_SHARED;
+			if (ceph_security_xattr_wanted(dir))
+				mask |= CEPH_CAP_XATTR_SHARED;
+			req->r_args.getattr.mask = cpu_to_le32(mask);
+
+			err = ceph_mdsc_do_request(mdsc, NULL, req);
+			switch (err) {
+			case 0:
+				if (d_is_positive(dentry) &&
+				    d_inode(dentry) == req->r_target_inode)
+					valid = 1;
+				break;
+			case -ENOENT:
+				if (d_is_negative(dentry))
+					valid = 1;
+				/* Fallthrough */
+			default:
+				break;
+			}
+			ceph_mdsc_put_request(req);
+			dout("d_revalidate %p lookup result=%d\n",
+			     dentry, err);
+		}
+	}
+
 	dout("d_revalidate %p %s\n", dentry, valid ? "valid" : "invalid");
 	if (valid) {
 		ceph_dentry_lru_touch(dentry);
@@ -1288,6 +1327,7 @@ void ceph_dentry_lru_del(struct dentry *dn)
 unsigned ceph_dentry_hash(struct inode *dir, struct dentry *dn)
 {
 	struct ceph_inode_info *dci = ceph_inode(dir);
+	unsigned hash;
 
 	switch (dci->i_dir_layout.dl_dir_hash) {
 	case 0:	/* for backward compat */
@@ -1295,8 +1335,11 @@ unsigned ceph_dentry_hash(struct inode *dir, struct dentry *dn)
 		return dn->d_name.hash;
 
 	default:
-		return ceph_str_hash(dci->i_dir_layout.dl_dir_hash,
+		spin_lock(&dn->d_lock);
+		hash = ceph_str_hash(dci->i_dir_layout.dl_dir_hash,
 				     dn->d_name.name, dn->d_name.len);
+		spin_unlock(&dn->d_lock);
+		return hash;
 	}
 }
 

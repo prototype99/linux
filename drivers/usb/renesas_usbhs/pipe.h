@@ -75,6 +75,7 @@ struct usbhs_pipe_info {
 char *usbhs_pipe_name(struct usbhs_pipe *pipe);
 struct usbhs_pipe
 *usbhs_pipe_malloc(struct usbhs_priv *priv, int endpoint_type, int dir_in);
+void usbhs_pipe_free(struct usbhs_pipe *pipe);
 int usbhs_pipe_probe(struct usbhs_priv *priv);
 void usbhs_pipe_remove(struct usbhs_priv *priv);
 int usbhs_pipe_is_dir_in(struct usbhs_pipe *pipe);
@@ -84,6 +85,7 @@ void usbhs_pipe_init(struct usbhs_priv *priv,
 int usbhs_pipe_get_maxpacket(struct usbhs_pipe *pipe);
 void usbhs_pipe_clear(struct usbhs_pipe *pipe);
 int usbhs_pipe_is_accessible(struct usbhs_pipe *pipe);
+bool usbhs_pipe_contains_transmittable_data(struct usbhs_pipe *pipe);
 void usbhs_pipe_enable(struct usbhs_pipe *pipe);
 void usbhs_pipe_disable(struct usbhs_pipe *pipe);
 void usbhs_pipe_stall(struct usbhs_pipe *pipe);

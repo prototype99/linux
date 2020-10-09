@@ -134,6 +134,8 @@ void hists__calc_col_len(struct hists *hists, struct hist_entry *h)
 			symlen = unresolved_col_width + 4 + 2;
 			hists__new_col_len(hists, HISTC_MEM_DADDR_SYMBOL,
 					   symlen);
+			hists__new_col_len(hists, HISTC_MEM_DCACHELINE,
+					   symlen);
 		}
 		if (h->mem_info->daddr.map) {
 			symlen = dso__name_len(h->mem_info->daddr.map->dso);
@@ -155,6 +157,9 @@ void hists__calc_col_len(struct hists *hists, struct hist_entry *h)
 	hists__new_col_len(hists, HISTC_MEM_LVL, 21 + 3);
 	hists__new_col_len(hists, HISTC_LOCAL_WEIGHT, 12);
 	hists__new_col_len(hists, HISTC_GLOBAL_WEIGHT, 12);
+
+	if (h->srcline)
+		hists__new_col_len(hists, HISTC_SRCLINE, strlen(h->srcline));
 
 	if (h->transaction)
 		hists__new_col_len(hists, HISTC_TRANSACTION,
@@ -1027,7 +1032,7 @@ void hists__collapse_resort(struct hists *hists, struct ui_progress *prog)
 	}
 }
 
-static int hist_entry__sort(struct hist_entry *a, struct hist_entry *b)
+static int64_t hist_entry__sort(struct hist_entry *a, struct hist_entry *b)
 {
 	struct perf_hpp_fmt *fmt;
 	int64_t cmp = 0;

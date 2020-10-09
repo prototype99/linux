@@ -626,7 +626,7 @@ static int mcp251x_setup(struct net_device *net, struct mcp251x_priv *priv,
 static int mcp251x_hw_reset(struct spi_device *spi)
 {
 	struct mcp251x_priv *priv = spi_get_drvdata(spi);
-	u8 reg;
+	unsigned long timeout;
 	int ret;
 
 	/* Wait for oscillator startup timer after power up */
@@ -640,10 +640,19 @@ static int mcp251x_hw_reset(struct spi_device *spi)
 	/* Wait for oscillator startup timer after reset */
 	mdelay(MCP251X_OST_DELAY_MS);
 	
-	reg = mcp251x_read_reg(spi, CANSTAT);
-	if ((reg & CANCTRL_REQOP_MASK) != CANCTRL_REQOP_CONF)
-		return -ENODEV;
+	/* Wait for reset to finish */
+	timeout = jiffies + HZ;
+	while ((mcp251x_read_reg(spi, CANSTAT) & CANCTRL_REQOP_MASK) !=
+	       CANCTRL_REQOP_CONF) {
+		usleep_range(MCP251X_OST_DELAY_MS * 1000,
+			     MCP251X_OST_DELAY_MS * 1000 * 2);
 
+		if (time_after(jiffies, timeout)) {
+			dev_err(&spi->dev,
+				"MCP251x didn't enter in conf mode after reset\n");
+			return -EBUSY;
+		}
+	}
 	return 0;
 }
 
@@ -1228,17 +1237,16 @@ static int __maybe_unused mcp251x_can_resume(struct device *dev)
 	struct spi_device *spi = to_spi_device(dev);
 	struct mcp251x_priv *priv = spi_get_drvdata(spi);
 
-	if (priv->after_suspend & AFTER_SUSPEND_POWER) {
+	if (priv->after_suspend & AFTER_SUSPEND_POWER)
 		mcp251x_power_enable(priv->power, 1);
+
+	if (priv->after_suspend & AFTER_SUSPEND_UP) {
+		mcp251x_power_enable(priv->transceiver, 1);
 		queue_work(priv->wq, &priv->restart_work);
 	} else {
-		if (priv->after_suspend & AFTER_SUSPEND_UP) {
-			mcp251x_power_enable(priv->transceiver, 1);
-			queue_work(priv->wq, &priv->restart_work);
-		} else {
-			priv->after_suspend = 0;
-		}
+		priv->after_suspend = 0;
 	}
+
 	priv->force_quit = 0;
 	enable_irq(spi->irq);
 	return 0;

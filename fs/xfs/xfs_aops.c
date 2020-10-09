@@ -377,7 +377,8 @@ xfs_end_bio(
 	xfs_ioend_t		*ioend = bio->bi_private;
 
 	ASSERT(atomic_read(&bio->bi_cnt) >= 1);
-	ioend->io_error = test_bit(BIO_UPTODATE, &bio->bi_flags) ? 0 : error;
+	if (!ioend->io_error && !test_bit(BIO_UPTODATE, &bio->bi_flags))
+		ioend->io_error = error;
 
 	/* Toss bio and pass work off to an xfsdatad thread */
 	bio->bi_private = NULL;
@@ -434,10 +435,22 @@ xfs_start_page_writeback(
 {
 	ASSERT(PageLocked(page));
 	ASSERT(!PageWriteback(page));
-	if (clear_dirty)
+
+	/*
+	 * if the page was not fully cleaned, we need to ensure that the higher
+	 * layers come back to it correctly. That means we need to keep the page
+	 * dirty, and for WB_SYNC_ALL writeback we need to ensure the
+	 * PAGECACHE_TAG_TOWRITE index mark is not removed so another attempt to
+	 * write this page in this writeback sweep will be made.
+	 */
+	if (clear_dirty) {
 		clear_page_dirty_for_io(page);
-	set_page_writeback(page);
+		set_page_writeback(page);
+	} else
+		set_page_writeback_keepwrite(page);
+
 	unlock_page(page);
+
 	/* If no buffers on the page are to be written, finish it here */
 	if (!buffers)
 		end_page_writeback(page);
@@ -1287,6 +1300,26 @@ __xfs_get_blocks(
 	if (error)
 		goto out_unlock;
 
+	/*
+	 * The only time we can ever safely find delalloc blocks on direct I/O
+	 * is a dio write to post-eof speculative preallocation. All other
+	 * scenarios are indicative of a problem or misuse (such as mixing
+	 * direct and mapped I/O).
+	 *
+	 * The file may be unmapped by the time we get here so we cannot
+	 * reliably fail the I/O based on mapping. Instead, fail the I/O if this
+	 * is a read or a write within eof. Otherwise, carry on but warn as a
+	 * precuation if the file happens to be mapped.
+	 */
+	if (direct && imap.br_startblock == DELAYSTARTBLOCK) {
+		if (!create || offset < i_size_read(VFS_I(ip))) {
+			WARN_ON_ONCE(1);
+			error = EIO;
+			goto out_unlock;
+		}
+		WARN_ON_ONCE(mapping_mapped(VFS_I(ip)->i_mapping));
+	}
+
 	if (create &&
 	    (!nimaps ||
 	     (imap.br_startblock == HOLESTARTBLOCK ||
@@ -1370,7 +1403,6 @@ __xfs_get_blocks(
 		set_buffer_new(bh_result);
 
 	if (imap.br_startblock == DELAYSTARTBLOCK) {
-		BUG_ON(direct);
 		if (create) {
 			set_buffer_uptodate(bh_result);
 			set_buffer_mapped(bh_result);
@@ -1753,11 +1785,72 @@ xfs_vm_readpages(
 	return mpage_readpages(mapping, pages, nr_pages, xfs_get_blocks);
 }
 
+/*
+ * This is basically a copy of __set_page_dirty_buffers() with one
+ * small tweak: buffers beyond EOF do not get marked dirty. If we mark them
+ * dirty, we'll never be able to clean them because we don't write buffers
+ * beyond EOF, and that means we can't invalidate pages that span EOF
+ * that have been marked dirty. Further, the dirty state can leak into
+ * the file interior if the file is extended, resulting in all sorts of
+ * bad things happening as the state does not match the underlying data.
+ *
+ * XXX: this really indicates that bufferheads in XFS need to die. Warts like
+ * this only exist because of bufferheads and how the generic code manages them.
+ */
+STATIC int
+xfs_vm_set_page_dirty(
+	struct page		*page)
+{
+	struct address_space	*mapping = page->mapping;
+	struct inode		*inode = mapping->host;
+	loff_t			end_offset;
+	loff_t			offset;
+	int			newly_dirty;
+
+	if (unlikely(!mapping))
+		return !TestSetPageDirty(page);
+
+	end_offset = i_size_read(inode);
+	offset = page_offset(page);
+
+	spin_lock(&mapping->private_lock);
+	if (page_has_buffers(page)) {
+		struct buffer_head *head = page_buffers(page);
+		struct buffer_head *bh = head;
+
+		do {
+			if (offset < end_offset)
+				set_buffer_dirty(bh);
+			bh = bh->b_this_page;
+			offset += 1 << inode->i_blkbits;
+		} while (bh != head);
+	}
+	newly_dirty = !TestSetPageDirty(page);
+	spin_unlock(&mapping->private_lock);
+
+	if (newly_dirty) {
+		/* sigh - __set_page_dirty() is static, so copy it here, too */
+		unsigned long flags;
+
+		spin_lock_irqsave(&mapping->tree_lock, flags);
+		if (page->mapping) {	/* Race with truncate? */
+			WARN_ON_ONCE(!PageUptodate(page));
+			account_page_dirtied(page, mapping);
+			radix_tree_tag_set(&mapping->page_tree,
+					page_index(page), PAGECACHE_TAG_DIRTY);
+		}
+		spin_unlock_irqrestore(&mapping->tree_lock, flags);
+		__mark_inode_dirty(mapping->host, I_DIRTY_PAGES);
+	}
+	return newly_dirty;
+}
+
 const struct address_space_operations xfs_address_space_operations = {
 	.readpage		= xfs_vm_readpage,
 	.readpages		= xfs_vm_readpages,
 	.writepage		= xfs_vm_writepage,
 	.writepages		= xfs_vm_writepages,
+	.set_page_dirty		= xfs_vm_set_page_dirty,
 	.releasepage		= xfs_vm_releasepage,
 	.invalidatepage		= xfs_vm_invalidatepage,
 	.write_begin		= xfs_vm_write_begin,

@@ -331,9 +331,18 @@ bool drm_fb_helper_restore_fbdev_mode_unlocked(struct drm_fb_helper *fb_helper)
 {
 	struct drm_device *dev = fb_helper->dev;
 	bool ret;
+	bool do_delayed = false;
+
 	drm_modeset_lock_all(dev);
 	ret = restore_fbdev_mode(fb_helper);
+
+	do_delayed = fb_helper->delayed_hotplug;
+	if (do_delayed)
+		fb_helper->delayed_hotplug = false;
 	drm_modeset_unlock_all(dev);
+
+	if (do_delayed)
+		drm_fb_helper_hotplug_event(fb_helper);
 	return ret;
 }
 EXPORT_SYMBOL(drm_fb_helper_restore_fbdev_mode_unlocked);
@@ -444,8 +453,8 @@ static void drm_fb_helper_dpms(struct fb_info *info, int dpms_mode)
 {
 	struct drm_fb_helper *fb_helper = info->par;
 	struct drm_device *dev = fb_helper->dev;
-	struct drm_crtc *crtc;
 	struct drm_connector *connector;
+	struct drm_mode_set *modeset;
 	int i, j;
 
 	/*
@@ -466,14 +475,13 @@ static void drm_fb_helper_dpms(struct fb_info *info, int dpms_mode)
 	}
 
 	for (i = 0; i < fb_helper->crtc_count; i++) {
-		crtc = fb_helper->crtc_info[i].mode_set.crtc;
+		modeset = &fb_helper->crtc_info[i].mode_set;
 
-		if (!crtc->enabled)
+		if (!modeset->crtc->enabled)
 			continue;
 
-		/* Walk the connectors & encoders on this fb turning them on/off */
-		for (j = 0; j < fb_helper->connector_count; j++) {
-			connector = fb_helper->connector_info[j]->connector;
+		for (j = 0; j < modeset->num_connectors; j++) {
+			connector = modeset->connectors[j];
 			connector->funcs->dpms(connector, dpms_mode);
 			drm_object_property_set_value(&connector->base,
 				dev->mode_config.dpms_property, dpms_mode);
@@ -741,6 +749,83 @@ int drm_fb_helper_setcmap(struct fb_cmap *cmap, struct fb_info *info)
 }
 EXPORT_SYMBOL(drm_fb_helper_setcmap);
 
+static bool drm_fb_pixel_format_equal(const struct fb_var_screeninfo *var_1,
+				      const struct fb_var_screeninfo *var_2)
+{
+	return var_1->bits_per_pixel == var_2->bits_per_pixel &&
+	       var_1->grayscale == var_2->grayscale &&
+	       var_1->red.offset == var_2->red.offset &&
+	       var_1->red.length == var_2->red.length &&
+	       var_1->red.msb_right == var_2->red.msb_right &&
+	       var_1->green.offset == var_2->green.offset &&
+	       var_1->green.length == var_2->green.length &&
+	       var_1->green.msb_right == var_2->green.msb_right &&
+	       var_1->blue.offset == var_2->blue.offset &&
+	       var_1->blue.length == var_2->blue.length &&
+	       var_1->blue.msb_right == var_2->blue.msb_right &&
+	       var_1->transp.offset == var_2->transp.offset &&
+	       var_1->transp.length == var_2->transp.length &&
+	       var_1->transp.msb_right == var_2->transp.msb_right;
+}
+
+static void drm_fb_helper_fill_pixel_fmt(struct fb_var_screeninfo *var,
+					 u8 depth)
+{
+	switch (depth) {
+	case 8:
+		var->red.offset = 0;
+		var->green.offset = 0;
+		var->blue.offset = 0;
+		var->red.length = 8; /* 8bit DAC */
+		var->green.length = 8;
+		var->blue.length = 8;
+		var->transp.offset = 0;
+		var->transp.length = 0;
+		break;
+	case 15:
+		var->red.offset = 10;
+		var->green.offset = 5;
+		var->blue.offset = 0;
+		var->red.length = 5;
+		var->green.length = 5;
+		var->blue.length = 5;
+		var->transp.offset = 15;
+		var->transp.length = 1;
+		break;
+	case 16:
+		var->red.offset = 11;
+		var->green.offset = 5;
+		var->blue.offset = 0;
+		var->red.length = 5;
+		var->green.length = 6;
+		var->blue.length = 5;
+		var->transp.offset = 0;
+		break;
+	case 24:
+		var->red.offset = 16;
+		var->green.offset = 8;
+		var->blue.offset = 0;
+		var->red.length = 8;
+		var->green.length = 8;
+		var->blue.length = 8;
+		var->transp.offset = 0;
+		var->transp.length = 0;
+		break;
+	case 32:
+		var->red.offset = 16;
+		var->green.offset = 8;
+		var->blue.offset = 0;
+		var->red.length = 8;
+		var->green.length = 8;
+		var->blue.length = 8;
+		var->transp.offset = 24;
+		var->transp.length = 8;
+		break;
+	default:
+		break;
+	}
+}
+
 /**
  * drm_fb_helper_check_var - implementation for ->fb_check_var
  * @var: screeninfo to check
@@ -751,10 +836,14 @@ int drm_fb_helper_check_var(struct fb_var_screeninfo *var,
 {
 	struct drm_fb_helper *fb_helper = info->par;
 	struct drm_framebuffer *fb = fb_helper->fb;
-	int depth;
 
-	if (var->pixclock != 0 || in_dbg_master())
+	if (in_dbg_master())
 		return -EINVAL;
+
+	if (var->pixclock != 0) {
+		DRM_DEBUG("fbdev emulation doesn't support changing the pixel clock, value of pixclock is ignored\n");
+		var->pixclock = 0;
+	}
 
 	/* Need to resize the fb object !!! */
 	if (var->bits_per_pixel > fb->bits_per_pixel ||
@@ -768,72 +857,29 @@ int drm_fb_helper_check_var(struct fb_var_screeninfo *var,
 		return -EINVAL;
 	}
 
-	switch (var->bits_per_pixel) {
-	case 16:
-		depth = (var->green.length == 6) ? 16 : 15;
-		break;
-	case 32:
-		depth = (var->transp.length > 0) ? 32 : 24;
-		break;
-	default:
-		depth = var->bits_per_pixel;
-		break;
+	/*
+	 * Workaround for SDL 1.2, which is known to be setting all pixel format
+	 * fields values to zero in some cases. We treat this situation as a
+	 * kind of "use some reasonable autodetected values".
+	 */
+	if (!var->red.offset     && !var->green.offset    &&
+	    !var->blue.offset    && !var->transp.offset   &&
+	    !var->red.length     && !var->green.length    &&
+	    !var->blue.length    && !var->transp.length   &&
+	    !var->red.msb_right  && !var->green.msb_right &&
+	    !var->blue.msb_right && !var->transp.msb_right) {
+		drm_fb_helper_fill_pixel_fmt(var, fb->depth);
 	}
 
-	switch (depth) {
-	case 8:
-		var->red.offset = 0;
-		var->green.offset = 0;
-		var->blue.offset = 0;
-		var->red.length = 8;
-		var->green.length = 8;
-		var->blue.length = 8;
-		var->transp.length = 0;
-		var->transp.offset = 0;
-		break;
-	case 15:
-		var->red.offset = 10;
-		var->green.offset = 5;
-		var->blue.offset = 0;
-		var->red.length = 5;
-		var->green.length = 5;
-		var->blue.length = 5;
-		var->transp.length = 1;
-		var->transp.offset = 15;
-		break;
-	case 16:
-		var->red.offset = 11;
-		var->green.offset = 5;
-		var->blue.offset = 0;
-		var->red.length = 5;
-		var->green.length = 6;
-		var->blue.length = 5;
-		var->transp.length = 0;
-		var->transp.offset = 0;
-		break;
-	case 24:
-		var->red.offset = 16;
-		var->green.offset = 8;
-		var->blue.offset = 0;
-		var->red.length = 8;
-		var->green.length = 8;
-		var->blue.length = 8;
-		var->transp.length = 0;
-		var->transp.offset = 0;
-		break;
-	case 32:
-		var->red.offset = 16;
-		var->green.offset = 8;
-		var->blue.offset = 0;
-		var->red.length = 8;
-		var->green.length = 8;
-		var->blue.length = 8;
-		var->transp.length = 8;
-		var->transp.offset = 24;
-		break;
-	default:
+	/*
+	 * drm fbdev emulation doesn't support changing the pixel format at all,
+	 * so reject all pixel format changing requests.
+	 */
+	if (!drm_fb_pixel_format_equal(var, &info->var)) {
+		DRM_DEBUG("fbdev emulation doesn't support changing the pixel format\n");
 		return -EINVAL;
 	}
+
 	return 0;
 }
 EXPORT_SYMBOL(drm_fb_helper_check_var);
@@ -858,10 +904,6 @@ int drm_fb_helper_set_par(struct fb_info *info)
 
 	drm_fb_helper_restore_fbdev_mode_unlocked(fb_helper);
 
-	if (fb_helper->delayed_hotplug) {
-		fb_helper->delayed_hotplug = false;
-		drm_fb_helper_hotplug_event(fb_helper);
-	}
 	return 0;
 }
 EXPORT_SYMBOL(drm_fb_helper_set_par);
@@ -1092,59 +1134,7 @@ void drm_fb_helper_fill_var(struct fb_info *info, struct drm_fb_helper *fb_helpe
 	info->var.height = -1;
 	info->var.width = -1;
 
-	switch (fb->depth) {
-	case 8:
-		info->var.red.offset = 0;
-		info->var.green.offset = 0;
-		info->var.blue.offset = 0;
-		info->var.red.length = 8; /* 8bit DAC */
-		info->var.green.length = 8;
-		info->var.blue.length = 8;
-		info->var.transp.offset = 0;
-		info->var.transp.length = 0;
-		break;
-	case 15:
-		info->var.red.offset = 10;
-		info->var.green.offset = 5;
-		info->var.blue.offset = 0;
-		info->var.red.length = 5;
-		info->var.green.length = 5;
-		info->var.blue.length = 5;
-		info->var.transp.offset = 15;
-		info->var.transp.length = 1;
-		break;
-	case 16:
-		info->var.red.offset = 11;
-		info->var.green.offset = 5;
-		info->var.blue.offset = 0;
-		info->var.red.length = 5;
-		info->var.green.length = 6;
-		info->var.blue.length = 5;
-		info->var.transp.offset = 0;
-		break;
-	case 24:
-		info->var.red.offset = 16;
-		info->var.green.offset = 8;
-		info->var.blue.offset = 0;
-		info->var.red.length = 8;
-		info->var.green.length = 8;
-		info->var.blue.length = 8;
-		info->var.transp.offset = 0;
-		info->var.transp.length = 0;
-		break;
-	case 32:
-		info->var.red.offset = 16;
-		info->var.green.offset = 8;
-		info->var.blue.offset = 0;
-		info->var.red.length = 8;
-		info->var.green.length = 8;
-		info->var.blue.length = 8;
-		info->var.transp.offset = 24;
-		info->var.transp.length = 8;
-		break;
-	default:
-		break;
-	}
+	drm_fb_helper_fill_pixel_fmt(&info->var, fb->depth);
 
 	info->var.xres = fb_width;
 	info->var.yres = fb_height;
@@ -1391,7 +1381,6 @@ static int drm_pick_crtcs(struct drm_fb_helper *fb_helper,
 			  int n, int width, int height)
 {
 	int c, o;
-	struct drm_device *dev = fb_helper->dev;
 	struct drm_connector *connector;
 	struct drm_connector_helper_funcs *connector_funcs;
 	struct drm_encoder *encoder;
@@ -1410,7 +1399,7 @@ static int drm_pick_crtcs(struct drm_fb_helper *fb_helper,
 	if (modes[n] == NULL)
 		return best_score;
 
-	crtcs = kzalloc(dev->mode_config.num_connector *
+	crtcs = kzalloc(fb_helper->connector_count *
 			sizeof(struct drm_fb_helper_crtc *), GFP_KERNEL);
 	if (!crtcs)
 		return best_score;
@@ -1456,7 +1445,7 @@ static int drm_pick_crtcs(struct drm_fb_helper *fb_helper,
 		if (score > best_score) {
 			best_score = score;
 			memcpy(best_crtcs, crtcs,
-			       dev->mode_config.num_connector *
+			       fb_helper->connector_count *
 			       sizeof(struct drm_fb_helper_crtc *));
 		}
 	}

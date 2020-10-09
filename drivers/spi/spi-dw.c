@@ -182,9 +182,11 @@ static inline u32 rx_max(struct dw_spi *dws)
 
 static void dw_writer(struct dw_spi *dws)
 {
-	u32 max = tx_max(dws);
+	u32 max;
 	u16 txw = 0;
 
+	spin_lock(&dws->buf_lock);
+	max = tx_max(dws);
 	while (max--) {
 		/* Set the tx word if the transfer's original "tx" is not null */
 		if (dws->tx_end - dws->len) {
@@ -196,13 +198,16 @@ static void dw_writer(struct dw_spi *dws)
 		dw_writew(dws, DW_SPI_DR, txw);
 		dws->tx += dws->n_bytes;
 	}
+	spin_unlock(&dws->buf_lock);
 }
 
 static void dw_reader(struct dw_spi *dws)
 {
-	u32 max = rx_max(dws);
+	u32 max;
 	u16 rxw;
 
+	spin_lock(&dws->buf_lock);
+	max = rx_max(dws);
 	while (max--) {
 		rxw = dw_readw(dws, DW_SPI_DR);
 		/* Care rx only if the transfer's original "rx" is not null */
@@ -214,6 +219,7 @@ static void dw_reader(struct dw_spi *dws)
 		}
 		dws->rx += dws->n_bytes;
 	}
+	spin_unlock(&dws->buf_lock);
 }
 
 static void *next_transfer(struct dw_spi *dws)
@@ -271,7 +277,7 @@ static void giveback(struct dw_spi *dws)
 					transfer_list);
 
 	if (!last_transfer->cs_change)
-		spi_chip_sel(dws, dws->cur_msg->spi, 0);
+		spi_chip_sel(dws, msg->spi, 0);
 
 	spi_finalize_current_message(dws->master);
 }
@@ -368,6 +374,7 @@ static void pump_transfers(unsigned long data)
 	struct spi_transfer *previous = NULL;
 	struct spi_device *spi = NULL;
 	struct chip_data *chip = NULL;
+	unsigned long flags;
 	u8 bits = 0;
 	u8 imask = 0;
 	u8 cs_change = 0;
@@ -381,9 +388,6 @@ static void pump_transfers(unsigned long data)
 	transfer = dws->cur_transfer;
 	chip = dws->cur_chip;
 	spi = message->spi;
-
-	if (unlikely(!chip->clk_div))
-		chip->clk_div = dws->max_freq / chip->speed_hz;
 
 	if (message->state == ERROR_STATE) {
 		message->status = -EIO;
@@ -409,6 +413,7 @@ static void pump_transfers(unsigned long data)
 	dws->dma_width = chip->dma_width;
 	dws->cs_control = chip->cs_control;
 
+	spin_lock_irqsave(&dws->buf_lock, flags);
 	dws->rx_dma = transfer->rx_dma;
 	dws->tx_dma = transfer->tx_dma;
 	dws->tx = (void *)transfer->tx_buf;
@@ -418,6 +423,7 @@ static void pump_transfers(unsigned long data)
 	dws->len = dws->cur_transfer->len;
 	if (chip != dws->prev_chip)
 		cs_change = 1;
+	spin_unlock_irqrestore(&dws->buf_lock, flags);
 
 	cr0 = chip->cr0;
 
@@ -425,7 +431,7 @@ static void pump_transfers(unsigned long data)
 	if (transfer->speed_hz) {
 		speed = chip->speed_hz;
 
-		if (transfer->speed_hz != speed) {
+		if ((transfer->speed_hz != speed) || (!chip->clk_div)) {
 			speed = transfer->speed_hz;
 
 			/* clk_div doesn't support odd number */
@@ -547,8 +553,7 @@ static int dw_spi_setup(struct spi_device *spi)
 	/* Only alloc on first setup */
 	chip = spi_get_ctldata(spi);
 	if (!chip) {
-		chip = devm_kzalloc(&spi->dev, sizeof(struct chip_data),
-				GFP_KERNEL);
+		chip = kzalloc(sizeof(struct chip_data), GFP_KERNEL);
 		if (!chip)
 			return -ENOMEM;
 		spi_set_ctldata(spi, chip);
@@ -587,7 +592,6 @@ static int dw_spi_setup(struct spi_device *spi)
 		dev_err(&spi->dev, "No max speed HZ parameter\n");
 		return -EINVAL;
 	}
-	chip->speed_hz = spi->max_speed_hz;
 
 	chip->tmode = 0; /* Tx & Rx */
 	/* Default SPI mode is SCPOL = 0, SCPH = 0 */
@@ -606,6 +610,14 @@ static int dw_spi_setup(struct spi_device *spi)
 	return 0;
 }
 
+static void dw_spi_cleanup(struct spi_device *spi)
+{
+	struct chip_data *chip = spi_get_ctldata(spi);
+
+	kfree(chip);
+	spi_set_ctldata(spi, NULL);
+}
+
 /* Restart the controller, disable all interrupts, clean rx fifo */
 static void spi_hw_init(struct dw_spi *dws)
 {
@@ -619,13 +631,13 @@ static void spi_hw_init(struct dw_spi *dws)
 	 */
 	if (!dws->fifo_len) {
 		u32 fifo;
-		for (fifo = 2; fifo <= 257; fifo++) {
+		for (fifo = 1; fifo < 256; fifo++) {
 			dw_writew(dws, DW_SPI_TXFLTR, fifo);
 			if (fifo != dw_readw(dws, DW_SPI_TXFLTR))
 				break;
 		}
 
-		dws->fifo_len = (fifo == 257) ? 0 : fifo;
+		dws->fifo_len = (fifo == 1) ? 0 : fifo;
 		dw_writew(dws, DW_SPI_TXFLTR, 0);
 	}
 }
@@ -648,9 +660,9 @@ int dw_spi_add_host(struct device *dev, struct dw_spi *dws)
 	dws->dma_addr = (dma_addr_t)(dws->paddr + 0x60);
 	snprintf(dws->name, sizeof(dws->name), "dw_spi%d",
 			dws->bus_num);
+	spin_lock_init(&dws->buf_lock);
 
-	ret = devm_request_irq(dev, dws->irq, dw_spi_irq, IRQF_SHARED,
-			dws->name, dws);
+	ret = request_irq(dws->irq, dw_spi_irq, IRQF_SHARED, dws->name, dws);
 	if (ret < 0) {
 		dev_err(&master->dev, "can not get IRQ\n");
 		goto err_free_master;
@@ -661,6 +673,7 @@ int dw_spi_add_host(struct device *dev, struct dw_spi *dws)
 	master->bus_num = dws->bus_num;
 	master->num_chipselect = dws->num_cs;
 	master->setup = dw_spi_setup;
+	master->cleanup = dw_spi_cleanup;
 	master->transfer_one_message = dw_spi_transfer_one_message;
 	master->max_speed_hz = dws->max_freq;
 
@@ -691,6 +704,7 @@ err_dma_exit:
 	if (dws->dma_ops && dws->dma_ops->dma_exit)
 		dws->dma_ops->dma_exit(dws);
 	spi_enable_chip(dws, 0);
+	free_irq(dws->irq, master);
 err_free_master:
 	spi_master_put(master);
 	return ret;
@@ -708,6 +722,8 @@ void dw_spi_remove_host(struct dw_spi *dws)
 	spi_enable_chip(dws, 0);
 	/* Disable clk */
 	spi_set_clk(dws, 0);
+
+	free_irq(dws->irq, dws->master);
 }
 EXPORT_SYMBOL_GPL(dw_spi_remove_host);
 

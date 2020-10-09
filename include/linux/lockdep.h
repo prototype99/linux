@@ -362,6 +362,10 @@ extern void lockdep_trace_alloc(gfp_t mask);
 		WARN_ON(debug_locks && !lockdep_is_held(l));	\
 	} while (0)
 
+#define lockdep_assert_held_once(l)	do {				\
+		WARN_ON_ONCE(debug_locks && !lockdep_is_held(l));	\
+	} while (0)
+
 #define lockdep_recursing(tsk)	((tsk)->lockdep_recursion)
 
 #else /* !CONFIG_LOCKDEP */
@@ -412,6 +416,7 @@ struct lock_class_key { };
 #define lockdep_depth(tsk)	(0)
 
 #define lockdep_assert_held(l)			do { (void)(l); } while (0)
+#define lockdep_assert_held_once(l)		do { (void)(l); } while (0)
 
 #define lockdep_recursing(tsk)			(0)
 
@@ -520,9 +525,24 @@ do {									\
 	lock_acquire(&(lock)->dep_map, 0, 0, 1, 1, NULL, _THIS_IP_);	\
 	lock_release(&(lock)->dep_map, 0, _THIS_IP_);			\
 } while (0)
+
+#define lockdep_assert_irqs_enabled()	do {				\
+		WARN_ONCE(debug_locks && !current->lockdep_recursion &&	\
+			  !current->hardirqs_enabled,			\
+			  "IRQs not enabled as expected\n");		\
+	} while (0)
+
+#define lockdep_assert_irqs_disabled()	do {				\
+		WARN_ONCE(debug_locks && !current->lockdep_recursion &&	\
+			  current->hardirqs_enabled,			\
+			  "IRQs not disabled as expected\n");		\
+	} while (0)
+
 #else
 # define might_lock(lock) do { } while (0)
 # define might_lock_read(lock) do { } while (0)
+# define lockdep_assert_irqs_enabled() do { } while (0)
+# define lockdep_assert_irqs_disabled() do { } while (0)
 #endif
 
 #ifdef CONFIG_PROVE_RCU

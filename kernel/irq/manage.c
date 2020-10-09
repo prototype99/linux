@@ -805,6 +805,9 @@ irq_forced_thread_fn(struct irq_desc *desc, struct irqaction *action)
 
 	local_bh_disable();
 	ret = action->thread_fn(action->irq, action->dev_id);
+	if (ret == IRQ_HANDLED)
+		atomic_inc(&desc->threads_handled);
+
 	irq_finalize_oneshot(desc, action);
 	local_bh_enable();
 	return ret;
@@ -821,6 +824,9 @@ static irqreturn_t irq_thread_fn(struct irq_desc *desc,
 	irqreturn_t ret;
 
 	ret = action->thread_fn(action->irq, action->dev_id);
+	if (ret == IRQ_HANDLED)
+		atomic_inc(&desc->threads_handled);
+
 	irq_finalize_oneshot(desc, action);
 	return ret;
 }
@@ -886,8 +892,6 @@ static int irq_thread(void *data)
 		irq_thread_check_affinity(desc, action);
 
 		action_ret = handler_fn(desc, action);
-		if (action_ret == IRQ_HANDLED)
-			atomic_inc(&desc->threads_handled);
 
 		wake_threads_waitq(desc);
 	}
@@ -1174,8 +1178,10 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 			ret = __irq_set_trigger(desc, irq,
 					new->flags & IRQF_TRIGGER_MASK);
 
-			if (ret)
+			if (ret) {
+				irq_release_resources(desc);
 				goto out_mask;
+			}
 		}
 
 		desc->istate &= ~(IRQS_AUTODETECT | IRQS_SPURIOUS_DISABLED | \
@@ -1311,6 +1317,7 @@ static struct irqaction *__free_irq(unsigned int irq, void *dev_id)
 	if (!desc)
 		return NULL;
 
+	chip_bus_lock(desc);
 	raw_spin_lock_irqsave(&desc->lock, flags);
 
 	/*
@@ -1324,7 +1331,7 @@ static struct irqaction *__free_irq(unsigned int irq, void *dev_id)
 		if (!action) {
 			WARN(1, "Trying to free already-free IRQ %d\n", irq);
 			raw_spin_unlock_irqrestore(&desc->lock, flags);
-
+			chip_bus_sync_unlock(desc);
 			return NULL;
 		}
 
@@ -1349,6 +1356,7 @@ static struct irqaction *__free_irq(unsigned int irq, void *dev_id)
 #endif
 
 	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	chip_bus_sync_unlock(desc);
 
 	unregister_handler_proc(irq, action);
 
@@ -1422,9 +1430,7 @@ void free_irq(unsigned int irq, void *dev_id)
 		desc->affinity_notify = NULL;
 #endif
 
-	chip_bus_lock(desc);
 	kfree(__free_irq(irq, dev_id));
-	chip_bus_sync_unlock(desc);
 }
 EXPORT_SYMBOL(free_irq);
 

@@ -690,7 +690,7 @@ void i9xx_check_fifo_underruns(struct drm_device *dev);
 
 /* intel_crt.c */
 void intel_crt_init(struct drm_device *dev);
-
+void intel_crt_reset(struct drm_encoder *encoder);
 
 /* intel_ddi.c */
 void intel_prepare_ddi(struct drm_device *dev);
@@ -721,6 +721,7 @@ void intel_ddi_get_config(struct intel_encoder *encoder,
 const char *intel_output_name(int output);
 bool intel_has_pending_fb_unpin(struct drm_device *dev);
 int intel_pch_rawclk(struct drm_device *dev);
+bool intel_pipe_has_type(struct drm_crtc *crtc, int type);
 int valleyview_cur_cdclk(struct drm_i915_private *dev_priv);
 void intel_mark_busy(struct drm_device *dev);
 void intel_mark_fb_busy(struct drm_i915_gem_object *obj,
@@ -754,8 +755,7 @@ bool intel_get_load_detect_pipe(struct drm_connector *connector,
 				struct intel_load_detect_pipe *old,
 				struct drm_modeset_acquire_ctx *ctx);
 void intel_release_load_detect_pipe(struct drm_connector *connector,
-				    struct intel_load_detect_pipe *old,
-				    struct drm_modeset_acquire_ctx *ctx);
+				    struct intel_load_detect_pipe *old);
 int intel_pin_and_fence_fb_obj(struct drm_device *dev,
 			       struct drm_i915_gem_object *obj,
 			       struct intel_engine_cs *pipelined);
@@ -965,6 +965,9 @@ void intel_enable_gt_powersave(struct drm_device *dev);
 void intel_disable_gt_powersave(struct drm_device *dev);
 void intel_reset_gt_powersave(struct drm_device *dev);
 void ironlake_teardown_rc6(struct drm_device *dev);
+bool i915_rc6_ctx_wa_check(struct drm_i915_private *i915);
+void i915_rc6_ctx_wa_suspend(struct drm_i915_private *i915);
+void i915_rc6_ctx_wa_resume(struct drm_i915_private *i915);
 void gen6_update_ring_freq(struct drm_device *dev);
 void gen6_rps_idle(struct drm_i915_private *dev_priv);
 void gen6_rps_boost(struct drm_i915_private *dev_priv);

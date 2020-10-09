@@ -541,6 +541,11 @@ static irqreturn_t pcie_isr(int irq, void *dev_id)
 		wake_up(&ctrl->queue);
 	}
 
+	if (pdev->ignore_hotplug) {
+		ctrl_dbg(ctrl, "ignoring hotplug event %#06x\n", intr_loc);
+		return IRQ_HANDLED;
+	}
+
 	if (!(intr_loc & ~PCI_EXP_SLTSTA_CC))
 		return IRQ_HANDLED;
 
@@ -568,7 +573,7 @@ static irqreturn_t pcie_isr(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-void pcie_enable_notification(struct controller *ctrl)
+static void pcie_enable_notification(struct controller *ctrl)
 {
 	u16 cmd, mask;
 
@@ -604,6 +609,17 @@ void pcie_enable_notification(struct controller *ctrl)
 		PCI_EXP_SLTCTL_DLLSCE);
 
 	pcie_write_cmd(ctrl, cmd, mask);
+}
+
+void pcie_reenable_notification(struct controller *ctrl)
+{
+	/*
+	 * Clear both Presence and Data Link Layer Changed to make sure
+	 * those events still fire after we have re-enabled them.
+	 */
+	pcie_capability_write_word(ctrl->pcie->port, PCI_EXP_SLTSTA,
+				   PCI_EXP_SLTSTA_PDC | PCI_EXP_SLTSTA_DLLSC);
+	pcie_enable_notification(ctrl);
 }
 
 static void pcie_disable_notification(struct controller *ctrl)
@@ -664,7 +680,7 @@ int pcie_init_notification(struct controller *ctrl)
 	return 0;
 }
 
-static void pcie_shutdown_notification(struct controller *ctrl)
+void pcie_shutdown_notification(struct controller *ctrl)
 {
 	if (ctrl->notification_enabled) {
 		pcie_disable_notification(ctrl);
@@ -699,7 +715,7 @@ abort:
 static void pcie_cleanup_slot(struct controller *ctrl)
 {
 	struct slot *slot = ctrl->slot;
-	cancel_delayed_work(&slot->work);
+
 	destroy_workqueue(slot->wq);
 	kfree(slot);
 }
@@ -794,7 +810,7 @@ struct controller *pcie_init(struct pcie_device *dev)
 	pcie_capability_write_word(pdev, PCI_EXP_SLTSTA,
 		PCI_EXP_SLTSTA_ABP | PCI_EXP_SLTSTA_PFD |
 		PCI_EXP_SLTSTA_MRLSC | PCI_EXP_SLTSTA_PDC |
-		PCI_EXP_SLTSTA_CC);
+		PCI_EXP_SLTSTA_CC | PCI_EXP_SLTSTA_DLLSC);
 
 	/* Disable software notification */
 	pcie_disable_notification(ctrl);
@@ -823,7 +839,6 @@ abort:
 
 void pciehp_release_ctrl(struct controller *ctrl)
 {
-	pcie_shutdown_notification(ctrl);
 	pcie_cleanup_slot(ctrl);
 	kfree(ctrl);
 }

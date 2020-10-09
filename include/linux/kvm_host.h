@@ -121,7 +121,6 @@ static inline bool is_error_page(struct page *page)
 #define KVM_REQ_MMU_SYNC           7
 #define KVM_REQ_CLOCK_UPDATE       8
 #define KVM_REQ_KICK               9
-#define KVM_REQ_DEACTIVATE_FPU    10
 #define KVM_REQ_EVENT             11
 #define KVM_REQ_APF_HALT          12
 #define KVM_REQ_STEAL_UPDATE      13
@@ -177,8 +176,8 @@ int kvm_io_bus_read(struct kvm *kvm, enum kvm_bus bus_idx, gpa_t addr, int len,
 		    void *val);
 int kvm_io_bus_register_dev(struct kvm *kvm, enum kvm_bus bus_idx, gpa_t addr,
 			    int len, struct kvm_io_device *dev);
-int kvm_io_bus_unregister_dev(struct kvm *kvm, enum kvm_bus bus_idx,
-			      struct kvm_io_device *dev);
+void kvm_io_bus_unregister_dev(struct kvm *kvm, enum kvm_bus bus_idx,
+			       struct kvm_io_device *dev);
 
 #ifdef CONFIG_KVM_ASYNC_PF
 struct kvm_async_pf {
@@ -232,7 +231,6 @@ struct kvm_vcpu {
 	struct mutex mutex;
 	struct kvm_run *run;
 
-	int fpu_active;
 	int guest_fpu_loaded, guest_xcr0_loaded;
 	wait_queue_head_t wq;
 	struct pid *pid;
@@ -1061,7 +1059,19 @@ struct kvm_device {
 /* create, destroy, and name are mandatory */
 struct kvm_device_ops {
 	const char *name;
+
+	/*
+	 * create is called holding kvm->lock and any operations not suitable
+	 * to do while holding the lock should be deferred to init (see
+	 * below).
+	 */
 	int (*create)(struct kvm_device *dev, u32 type);
+
+	/*
+	 * init is called after create if create is successful and is called
+	 * outside of holding kvm->lock.
+	 */
+	void (*init)(struct kvm_device *dev);
 
 	/*
 	 * Destroy is responsible for freeing dev.

@@ -199,6 +199,7 @@ static long _freq_tbl_determine_rate(struct clk_hw *hw,
 	clk_flags = __clk_get_flags(hw->clk);
 	*p = clk_get_parent_by_index(hw->clk, f->src);
 	if (clk_flags & CLK_SET_RATE_PARENT) {
+		rate = f->freq;
 		if (f->pre_div) {
 			rate /= 2;
 			rate *= f->pre_div + 1;
@@ -253,7 +254,7 @@ static int clk_rcg2_configure(struct clk_rcg2 *rcg, const struct freq_tbl *f)
 	mask |= CFG_SRC_SEL_MASK | CFG_MODE_MASK;
 	cfg = f->pre_div << CFG_SRC_DIV_SHIFT;
 	cfg |= rcg->parent_map[f->src] << CFG_SRC_SEL_SHIFT;
-	if (rcg->mnd_width && f->n)
+	if (rcg->mnd_width && f->n && (f->m != f->n))
 		cfg |= CFG_MODE_DUAL_EDGE;
 	ret = regmap_update_bits(rcg->clkr.regmap,
 			rcg->cmd_rcgr + CFG_REG, mask, cfg);

@@ -31,6 +31,7 @@ enum can_mode {
  * CAN common private data
  */
 struct can_priv {
+	struct net_device *dev;
 	struct can_device_stats can_stats;
 
 	struct can_bittiming bittiming, data_bittiming;
@@ -43,7 +44,7 @@ struct can_priv {
 	u32 ctrlmode_supported;
 
 	int restart_ms;
-	struct timer_list restart_timer;
+	struct delayed_work restart_work;
 
 	int (*do_set_bittiming)(struct net_device *dev);
 	int (*do_set_data_bittiming)(struct net_device *dev);
@@ -121,8 +122,12 @@ void unregister_candev(struct net_device *dev);
 int can_restart_now(struct net_device *dev);
 void can_bus_off(struct net_device *dev);
 
+void can_change_state(struct net_device *dev, struct can_frame *cf,
+		      enum can_state tx_state, enum can_state rx_state);
+
 void can_put_echo_skb(struct sk_buff *skb, struct net_device *dev,
 		      unsigned int idx);
+struct sk_buff *__can_get_echo_skb(struct net_device *dev, unsigned int idx, u8 *len_ptr);
 unsigned int can_get_echo_skb(struct net_device *dev, unsigned int idx);
 void can_free_echo_skb(struct net_device *dev, unsigned int idx);
 

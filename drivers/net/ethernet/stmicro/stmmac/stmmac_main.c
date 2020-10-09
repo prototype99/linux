@@ -275,7 +275,13 @@ static void stmmac_eee_ctrl_timer(unsigned long arg)
  */
 bool stmmac_eee_init(struct stmmac_priv *priv)
 {
+	int interface = priv->plat->interface;
 	bool ret = false;
+
+	if ((interface != PHY_INTERFACE_MODE_MII) &&
+	    (interface != PHY_INTERFACE_MODE_GMII) &&
+	    !phy_interface_mode_is_rgmii(interface))
+		goto out;
 
 	/* Using PCS we cannot dial with the phy registers at this stage
 	 * so we do not support extra feature like EEE.
@@ -533,6 +539,7 @@ static int stmmac_hwtstamp_ioctl(struct net_device *dev, struct ifreq *ifr)
 			ptp_v2 = PTP_TCR_TSVER2ENA;
 			/* take time stamp for all event messages */
 			snap_type_sel = PTP_TCR_SNAPTYPSEL_1;
+			ts_event_en = PTP_TCR_TSEVNTENA;
 
 			ptp_over_ipv4_udp = PTP_TCR_TSIPV4ENA;
 			ptp_over_ipv6_udp = PTP_TCR_TSIPV6ENA;
@@ -897,7 +904,9 @@ static int stmmac_set_bfsize(int mtu, int bufsize)
 {
 	int ret = bufsize;
 
-	if (mtu >= BUF_SIZE_4KiB)
+	if (mtu >= BUF_SIZE_8KiB)
+		ret = BUF_SIZE_16KiB;
+	else if (mtu >= BUF_SIZE_4KiB)
 		ret = BUF_SIZE_8KiB;
 	else if (mtu >= BUF_SIZE_2KiB)
 		ret = BUF_SIZE_4KiB;
@@ -926,11 +935,11 @@ static void stmmac_clear_descriptors(struct stmmac_priv *priv)
 		if (priv->extend_desc)
 			priv->hw->desc->init_rx_desc(&priv->dma_erx[i].basic,
 						     priv->use_riwt, priv->mode,
-						     (i == rxsize - 1));
+						     (i == rxsize - 1), priv->dma_buf_sz);
 		else
 			priv->hw->desc->init_rx_desc(&priv->dma_rx[i],
 						     priv->use_riwt, priv->mode,
-						     (i == rxsize - 1));
+						     (i == rxsize - 1), priv->dma_buf_sz);
 	for (i = 0; i < txsize; i++)
 		if (priv->extend_desc)
 			priv->hw->desc->init_tx_desc(&priv->dma_etx[i].basic,
@@ -1142,41 +1151,41 @@ static int alloc_dma_desc_resources(struct stmmac_priv *priv)
 		goto err_tx_skbuff;
 
 	if (priv->extend_desc) {
-		priv->dma_erx = dma_alloc_coherent(priv->device, rxsize *
-						   sizeof(struct
-							  dma_extended_desc),
-						   &priv->dma_rx_phy,
-						   GFP_KERNEL);
+		priv->dma_erx = dma_zalloc_coherent(priv->device, rxsize *
+						    sizeof(struct
+							   dma_extended_desc),
+						    &priv->dma_rx_phy,
+						    GFP_KERNEL);
 		if (!priv->dma_erx)
 			goto err_dma;
 
-		priv->dma_etx = dma_alloc_coherent(priv->device, txsize *
-						   sizeof(struct
-							  dma_extended_desc),
-						   &priv->dma_tx_phy,
-						   GFP_KERNEL);
+		priv->dma_etx = dma_zalloc_coherent(priv->device, txsize *
+						    sizeof(struct
+							   dma_extended_desc),
+						    &priv->dma_tx_phy,
+						    GFP_KERNEL);
 		if (!priv->dma_etx) {
 			dma_free_coherent(priv->device, priv->dma_rx_size *
-					sizeof(struct dma_extended_desc),
-					priv->dma_erx, priv->dma_rx_phy);
+					  sizeof(struct dma_extended_desc),
+					  priv->dma_erx, priv->dma_rx_phy);
 			goto err_dma;
 		}
 	} else {
-		priv->dma_rx = dma_alloc_coherent(priv->device, rxsize *
-						  sizeof(struct dma_desc),
-						  &priv->dma_rx_phy,
-						  GFP_KERNEL);
+		priv->dma_rx = dma_zalloc_coherent(priv->device, rxsize *
+						   sizeof(struct dma_desc),
+						   &priv->dma_rx_phy,
+						   GFP_KERNEL);
 		if (!priv->dma_rx)
 			goto err_dma;
 
-		priv->dma_tx = dma_alloc_coherent(priv->device, txsize *
-						  sizeof(struct dma_desc),
-						  &priv->dma_tx_phy,
-						  GFP_KERNEL);
+		priv->dma_tx = dma_zalloc_coherent(priv->device, txsize *
+						   sizeof(struct dma_desc),
+						   &priv->dma_tx_phy,
+						   GFP_KERNEL);
 		if (!priv->dma_tx) {
 			dma_free_coherent(priv->device, priv->dma_rx_size *
-					sizeof(struct dma_desc),
-					priv->dma_rx, priv->dma_rx_phy);
+					  sizeof(struct dma_desc),
+					  priv->dma_rx, priv->dma_rx_phy);
 			goto err_dma;
 		}
 	}
@@ -2053,8 +2062,7 @@ static inline void stmmac_rx_refill(struct stmmac_priv *priv)
 static int stmmac_rx(struct stmmac_priv *priv, int limit)
 {
 	unsigned int rxsize = priv->dma_rx_size;
-	unsigned int entry = priv->cur_rx % rxsize;
-	unsigned int next_entry;
+	unsigned int next_entry = priv->cur_rx % rxsize;
 	unsigned int count = 0;
 	int coe = priv->plat->rx_coe;
 
@@ -2066,8 +2074,10 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit)
 			stmmac_display_ring((void *)priv->dma_rx, rxsize, 0);
 	}
 	while (count < limit) {
-		int status;
+		int status, entry;
 		struct dma_desc *p;
+
+		entry = next_entry;
 
 		if (priv->extend_desc)
 			p = (struct dma_desc *)(priv->dma_erx + entry);
@@ -2113,6 +2123,12 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit)
 
 			frame_len = priv->hw->desc->get_rx_frame_len(p, coe);
 
+			/*  check if frame_len fits the preallocated memory */
+			if (frame_len > priv->dma_buf_sz) {
+				priv->dev->stats.rx_length_errors++;
+				continue;
+			}
+
 			/* ACS is set; GMAC core strips PAD/FCS for IEEE 802.3
 			 * Type frames (LLC/LLC-SNAP)
 			 */
@@ -2131,7 +2147,7 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit)
 				pr_err("%s: Inconsistent Rx descriptor chain\n",
 				       priv->dev->name);
 				priv->dev->stats.rx_dropped++;
-				break;
+				continue;
 			}
 			prefetch(skb->data - NET_IP_ALIGN);
 			priv->rx_skbuff[entry] = NULL;
@@ -2162,7 +2178,6 @@ static int stmmac_rx(struct stmmac_priv *priv, int limit)
 			priv->dev->stats.rx_packets++;
 			priv->dev->stats.rx_bytes += frame_len;
 		}
-		entry = next_entry;
 	}
 
 	stmmac_rx_refill(priv);
@@ -2381,6 +2396,20 @@ static int stmmac_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	return ret;
 }
 
+static int stmmac_set_mac_address(struct net_device *ndev, void *addr)
+{
+	struct stmmac_priv *priv = netdev_priv(ndev);
+	int ret = 0;
+
+	ret = eth_mac_addr(ndev, addr);
+	if (ret)
+		return ret;
+
+	priv->hw->mac->set_umac_addr(priv->ioaddr, ndev->dev_addr, 0);
+
+	return ret;
+}
+
 #ifdef CONFIG_STMMAC_DEBUG_FS
 static struct dentry *stmmac_fs_dir;
 static struct dentry *stmmac_rings_status;
@@ -2580,7 +2609,7 @@ static const struct net_device_ops stmmac_netdev_ops = {
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	.ndo_poll_controller = stmmac_poll_controller,
 #endif
-	.ndo_set_mac_address = eth_mac_addr,
+	.ndo_set_mac_address = stmmac_set_mac_address,
 };
 
 /**
@@ -2769,12 +2798,6 @@ struct stmmac_priv *stmmac_dvr_probe(struct device *device,
 	spin_lock_init(&priv->lock);
 	spin_lock_init(&priv->tx_lock);
 
-	ret = register_netdev(ndev);
-	if (ret) {
-		pr_err("%s: ERROR %i registering the device\n", __func__, ret);
-		goto error_netdev_register;
-	}
-
 	/* If a specific clk_csr value is passed from the platform
 	 * this means that the CSR Clock Range selection cannot be
 	 * changed at run-time and it is fixed. Viceversa the driver'll try to
@@ -2799,11 +2822,21 @@ struct stmmac_priv *stmmac_dvr_probe(struct device *device,
 		}
 	}
 
+	ret = register_netdev(ndev);
+	if (ret) {
+		netdev_err(priv->dev, "%s: ERROR %i registering the device\n",
+			   __func__, ret);
+		goto error_netdev_register;
+	}
+
 	return priv;
 
-error_mdio_register:
-	unregister_netdev(ndev);
 error_netdev_register:
+	if (priv->pcs != STMMAC_PCS_RGMII &&
+	    priv->pcs != STMMAC_PCS_TBI &&
+	    priv->pcs != STMMAC_PCS_RTBI)
+		stmmac_mdio_unregister(ndev);
+error_mdio_register:
 	netif_napi_del(&priv->napi);
 error_hw_init:
 	clk_disable_unprepare(priv->stmmac_clk);

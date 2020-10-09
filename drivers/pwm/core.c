@@ -273,10 +273,12 @@ int pwmchip_add(struct pwm_chip *chip)
 	if (IS_ENABLED(CONFIG_OF))
 		of_pwmchip_add(chip);
 
-	pwmchip_sysfs_export(chip);
-
 out:
 	mutex_unlock(&pwm_lock);
+
+	if (!ret)
+		pwmchip_sysfs_export(chip);
+
 	return ret;
 }
 EXPORT_SYMBOL_GPL(pwmchip_add);
@@ -292,6 +294,8 @@ int pwmchip_remove(struct pwm_chip *chip)
 {
 	unsigned int i;
 	int ret = 0;
+
+	pwmchip_sysfs_unexport(chip);
 
 	mutex_lock(&pwm_lock);
 
@@ -310,8 +314,6 @@ int pwmchip_remove(struct pwm_chip *chip)
 		of_pwmchip_remove(chip);
 
 	free_pwms(chip);
-
-	pwmchip_sysfs_unexport(chip);
 
 out:
 	mutex_unlock(&pwm_lock);
@@ -606,6 +608,8 @@ struct pwm_device *pwm_get(struct device *dev, const char *con_id)
 	unsigned int best = 0;
 	struct pwm_lookup *p;
 	unsigned int match;
+	unsigned int period;
+	enum pwm_polarity polarity;
 
 	/* look up via DT first */
 	if (IS_ENABLED(CONFIG_OF) && dev && dev->of_node)
@@ -653,6 +657,8 @@ struct pwm_device *pwm_get(struct device *dev, const char *con_id)
 		if (match > best) {
 			chip = pwmchip_find_by_name(p->provider);
 			index = p->index;
+			period = p->period;
+			polarity = p->polarity;
 
 			if (match != 3)
 				best = match;
@@ -668,8 +674,8 @@ struct pwm_device *pwm_get(struct device *dev, const char *con_id)
 	if (IS_ERR(pwm))
 		return pwm;
 
-	pwm_set_period(pwm, p->period);
-	pwm_set_polarity(pwm, p->polarity);
+	pwm_set_period(pwm, period);
+	pwm_set_polarity(pwm, polarity);
 
 
 	return pwm;

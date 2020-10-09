@@ -298,8 +298,7 @@ ecryptfs_create(struct inode *directory_inode, struct dentry *ecryptfs_dentry,
 		iput(ecryptfs_inode);
 		goto out;
 	}
-	unlock_new_inode(ecryptfs_inode);
-	d_instantiate(ecryptfs_dentry, ecryptfs_inode);
+	d_instantiate_new(ecryptfs_dentry, ecryptfs_inode);
 out:
 	return rc;
 }
@@ -342,9 +341,9 @@ static int ecryptfs_lookup_interpose(struct dentry *dentry,
 				     struct dentry *lower_dentry,
 				     struct inode *dir_inode)
 {
-	struct inode *inode, *lower_inode = lower_dentry->d_inode;
+	struct path *path = ecryptfs_dentry_to_lower_path(dentry->d_parent);
+	struct inode *inode, *lower_inode;
 	struct ecryptfs_dentry_info *dentry_info;
-	struct vfsmount *lower_mnt;
 	int rc = 0;
 
 	dentry_info = kmem_cache_alloc(ecryptfs_dentry_info_cache, GFP_KERNEL);
@@ -356,15 +355,22 @@ static int ecryptfs_lookup_interpose(struct dentry *dentry,
 		return -ENOMEM;
 	}
 
-	lower_mnt = mntget(ecryptfs_dentry_to_lower_mnt(dentry->d_parent));
-	fsstack_copy_attr_atime(dir_inode, lower_dentry->d_parent->d_inode);
+	fsstack_copy_attr_atime(dir_inode, path->dentry->d_inode);
 	BUG_ON(!d_count(lower_dentry));
 
 	ecryptfs_set_dentry_private(dentry, dentry_info);
-	dentry_info->lower_path.mnt = lower_mnt;
+	dentry_info->lower_path.mnt = mntget(path->mnt);
 	dentry_info->lower_path.dentry = lower_dentry;
 
-	if (!lower_dentry->d_inode) {
+	/*
+	 * negative dentry can go positive under us here - its parent is not
+	 * locked.  That's OK and that could happen just as we return from
+	 * ecryptfs_lookup() anyway.  Just need to be careful and fetch
+	 * ->d_inode only once - it's not stable here.
+	 */
+	lower_inode = ACCESS_ONCE(lower_dentry->d_inode);
+
+	if (!lower_inode) {
 		/* We want to add because we couldn't find in lower */
 		d_add(dentry, NULL);
 		return 0;
@@ -952,7 +958,7 @@ static int ecryptfs_setattr(struct dentry *dentry, struct iattr *ia)
 	}
 	mutex_unlock(&crypt_stat->cs_mutex);
 
-	rc = inode_change_ok(inode, ia);
+	rc = setattr_prepare(dentry, ia);
 	if (rc)
 		goto out;
 	if (ia->ia_valid & ATTR_SIZE) {
@@ -1039,7 +1045,7 @@ ecryptfs_setxattr(struct dentry *dentry, const char *name, const void *value,
 	}
 
 	rc = vfs_setxattr(lower_dentry, name, value, size, flags);
-	if (!rc)
+	if (!rc && dentry->d_inode)
 		fsstack_copy_attr_all(dentry->d_inode, lower_dentry->d_inode);
 out:
 	return rc;

@@ -157,14 +157,15 @@ static void __init imx6q_clocks_init(struct device_node *ccm_node)
 	np = of_find_compatible_node(NULL, NULL, "fsl,imx6q-anatop");
 	base = of_iomap(np, 0);
 	WARN_ON(!base);
+	of_node_put(np);
 
 	/* Audio/video PLL post dividers do not work on i.MX6q revision 1.0 */
 	if (cpu_is_imx6q() && imx_get_soc_revision() == IMX_CHIP_REVISION_1_0) {
 		post_div_table[1].div = 1;
 		post_div_table[2].div = 1;
 		video_div_table[1].div = 1;
-		video_div_table[2].div = 1;
-	};
+		video_div_table[3].div = 1;
+	}
 
 	/*                   type                               name         parent_name  base     div_mask */
 	clk[pll1_sys]      = imx_clk_pllv3(IMX_PLLV3_SYS,	"pll1_sys",	"osc", base,        0x7f);
@@ -413,7 +414,7 @@ static void __init imx6q_clocks_init(struct device_node *ccm_node)
 	clk[gpmi_io]      = imx_clk_gate2("gpmi_io",       "enfc",              base + 0x78, 28);
 	clk[gpmi_apb]     = imx_clk_gate2("gpmi_apb",      "usdhc3",            base + 0x78, 30);
 	clk[rom]          = imx_clk_gate2("rom",           "ahb",               base + 0x7c, 0);
-	clk[sata]         = imx_clk_gate2("sata",          "ipg",               base + 0x7c, 4);
+	clk[sata]         = imx_clk_gate2("sata",          "ahb",               base + 0x7c, 4);
 	clk[sdma]         = imx_clk_gate2("sdma",          "ahb",               base + 0x7c, 6);
 	clk[spba]         = imx_clk_gate2("spba",          "ipg",               base + 0x7c, 12);
 	clk[spdif]        = imx_clk_gate2("spdif",         "spdif_podf",    	base + 0x7c, 14);

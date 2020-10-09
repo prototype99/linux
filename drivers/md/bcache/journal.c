@@ -454,7 +454,7 @@ static void do_journal_discard(struct cache *ca)
 
 		closure_get(&ca->set->cl);
 		INIT_WORK(&ja->discard_work, journal_discard_work);
-		schedule_work(&ja->discard_work);
+		queue_work(bch_journal_wq, &ja->discard_work);
 	}
 }
 
@@ -507,11 +507,11 @@ static void journal_reclaim(struct cache_set *c)
 				  ca->sb.nr_this_dev);
 	}
 
-	bkey_init(k);
-	SET_KEY_PTRS(k, n);
-
-	if (n)
+	if (n) {
+		bkey_init(k);
+		SET_KEY_PTRS(k, n);
 		c->journal.blocks_free = c->sb.bucket_size >> c->block_bits;
+	}
 out:
 	if (!journal_full(&c->journal))
 		__closure_wake_up(&c->journal.wait);
@@ -559,7 +559,7 @@ static void journal_write_done(struct closure *cl)
 		: &j->w[0];
 
 	__closure_wake_up(&w->wait);
-	continue_at_nobarrier(cl, journal_write, system_wq);
+	continue_at_nobarrier(cl, journal_write, bch_journal_wq);
 }
 
 static void journal_write_unlock(struct closure *cl)
@@ -586,12 +586,14 @@ static void journal_write_unlocked(struct closure *cl)
 
 	if (!w->need_write) {
 		closure_return_with_destructor(cl, journal_write_unlock);
+		return;
 	} else if (journal_full(&c->journal)) {
 		journal_reclaim(c);
 		spin_unlock(&c->journal.lock);
 
 		btree_flush_write(c);
-		continue_at(cl, journal_write, system_wq);
+		continue_at(cl, journal_write, bch_journal_wq);
+		return;
 	}
 
 	c->journal.blocks_free -= set_blocks(w->data, block_bytes(c));
@@ -632,6 +634,9 @@ static void journal_write_unlocked(struct closure *cl)
 
 		ca->journal.seq[ca->journal.cur_idx] = w->data->seq;
 	}
+
+	/* If KEY_PTRS(k) == 0, this jset gets lost in air */
+	BUG_ON(i == 0);
 
 	atomic_dec_bug(&fifo_back(&c->journal.pin));
 	bch_journal_next(&c->journal);

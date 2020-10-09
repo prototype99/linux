@@ -2959,7 +2959,15 @@ static int ni_ao_inttrig(struct comedi_device *dev,
 	int i;
 	static const int timeout = 1000;
 
-	if (trig_num != cmd->start_arg)
+	/*
+	 * Require trig_num == cmd->start_arg when cmd->start_src == TRIG_INT.
+	 * For backwards compatibility, also allow trig_num == 0 when
+	 * cmd->start_src != TRIG_INT (i.e. when cmd->start_src == TRIG_EXT);
+	 * in that case, the internal trigger is being used as a pre-trigger
+	 * before the external trigger.
+	 */
+	if (!(trig_num == cmd->start_arg ||
+	      (trig_num == 0 && cmd->start_src != TRIG_INT)))
 		return -EINVAL;
 
 	/* Null trig at beginning prevent ao start trigger from executing more than
@@ -4407,7 +4415,7 @@ static int ni_E_init(struct comedi_device *dev)
 		else
 			s->maxdata = 0xffffff;
 		s->insn_read = ni_tio_insn_read;
-		s->insn_write = ni_tio_insn_read;
+		s->insn_write = ni_tio_insn_write;
 		s->insn_config = ni_tio_insn_config;
 #ifdef PCIDMA
 		s->subdev_flags |= SDF_CMD_READ /* | SDF_CMD_WRITE */;
@@ -5478,6 +5486,9 @@ static int ni_valid_rtsi_output_source(struct comedi_device *dev, unsigned chan,
 	case NI_RTSI_OUTPUT_G_GATE0:
 	case NI_RTSI_OUTPUT_RGOUT0:
 	case NI_RTSI_OUTPUT_RTSI_BRD_0:
+	case NI_RTSI_OUTPUT_RTSI_BRD_0 + 1:
+	case NI_RTSI_OUTPUT_RTSI_BRD_0 + 2:
+	case NI_RTSI_OUTPUT_RTSI_BRD_0 + 3:
 		return 1;
 		break;
 	case NI_RTSI_OUTPUT_RTSI_OSC:
@@ -5505,12 +5516,19 @@ static int ni_set_rtsi_routing(struct comedi_device *dev, unsigned chan,
 		    RTSI_Trig_Output_Bits(chan, source);
 		devpriv->stc_writew(dev, devpriv->rtsi_trig_a_output_reg,
 				    RTSI_Trig_A_Output_Register);
-	} else if (chan < 8) {
+	} else if (chan < num_configurable_rtsi_channels(dev)) {
 		devpriv->rtsi_trig_b_output_reg &= ~RTSI_Trig_Output_Mask(chan);
 		devpriv->rtsi_trig_b_output_reg |=
 		    RTSI_Trig_Output_Bits(chan, source);
 		devpriv->stc_writew(dev, devpriv->rtsi_trig_b_output_reg,
 				    RTSI_Trig_B_Output_Register);
+	} else if (chan != old_RTSI_clock_channel) {
+		/* probably should never reach this, since the
+		 * ni_valid_rtsi_output_source above errors out if chan is too
+		 * high
+		 */
+		dev_err(dev->class_dev, "%s: unknown rtsi channel\n", __func__);
+		return -EINVAL;
 	}
 	return 2;
 }
@@ -5525,12 +5543,12 @@ static unsigned ni_get_rtsi_routing(struct comedi_device *dev, unsigned chan)
 	} else if (chan < num_configurable_rtsi_channels(dev)) {
 		return RTSI_Trig_Output_Source(chan,
 					       devpriv->rtsi_trig_b_output_reg);
-	} else {
-		if (chan == old_RTSI_clock_channel)
-			return NI_RTSI_OUTPUT_RTSI_OSC;
-		printk("%s: bug! should never get here?\n", __func__);
-		return 0;
+	} else if (chan == old_RTSI_clock_channel) {
+		return NI_RTSI_OUTPUT_RTSI_OSC;
 	}
+
+	dev_err(dev->class_dev, "%s: unknown rtsi channel\n", __func__);
+	return -EINVAL;
 }
 
 static int ni_rtsi_insn_config(struct comedi_device *dev,

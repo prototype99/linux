@@ -337,11 +337,11 @@ nfs4_state_protect(struct nfs_client *clp, unsigned long sp4_mode,
  */
 static inline void
 nfs4_state_protect_write(struct nfs_client *clp, struct rpc_clnt **clntp,
-			 struct rpc_message *msg, struct nfs_pgio_data *wdata)
+			 struct rpc_message *msg, struct nfs_pgio_header *hdr)
 {
 	if (_nfs4_state_protect(clp, NFS_SP4_MACH_CRED_WRITE, clntp, msg) &&
 	    !test_bit(NFS_SP4_MACH_CRED_COMMIT, &clp->cl_sp4_flags))
-		wdata->args.stable = NFS_FILE_SYNC;
+		hdr->args.stable = NFS_FILE_SYNC;
 }
 #else /* CONFIG_NFS_v4_1 */
 static inline struct nfs4_session *nfs4_get_session(const struct nfs_server *server)
@@ -369,7 +369,7 @@ nfs4_state_protect(struct nfs_client *clp, unsigned long sp4_flags,
 
 static inline void
 nfs4_state_protect_write(struct nfs_client *clp, struct rpc_clnt **clntp,
-			 struct rpc_message *msg, struct nfs_pgio_data *wdata)
+			 struct rpc_message *msg, struct nfs_pgio_header *hdr)
 {
 }
 #endif /* CONFIG_NFS_V4_1 */
@@ -419,7 +419,8 @@ static inline void nfs4_schedule_session_recovery(struct nfs4_session *session, 
 
 extern struct nfs4_state_owner *nfs4_get_state_owner(struct nfs_server *, struct rpc_cred *, gfp_t);
 extern void nfs4_put_state_owner(struct nfs4_state_owner *);
-extern void nfs4_purge_state_owners(struct nfs_server *);
+extern void nfs4_purge_state_owners(struct nfs_server *, struct list_head *);
+extern void nfs4_free_state_owners(struct list_head *head);
 extern struct nfs4_state * nfs4_get_open_state(struct inode *, struct nfs4_state_owner *);
 extern void nfs4_put_open_state(struct nfs4_state *);
 extern void nfs4_close_state(struct nfs4_state *, fmode_t);

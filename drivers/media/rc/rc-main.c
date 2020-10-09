@@ -60,7 +60,7 @@ struct rc_map *rc_map_get(const char *name)
 	struct rc_map_list *map;
 
 	map = seek_rc_map(name);
-#ifdef MODULE
+#ifdef CONFIG_MODULES
 	if (!map) {
 		int rc = request_module("%s", name);
 		if (rc < 0) {
@@ -1162,9 +1162,6 @@ static int rc_dev_uevent(struct device *device, struct kobj_uevent_env *env)
 {
 	struct rc_dev *dev = to_rc_dev(device);
 
-	if (!dev || !dev->input_dev)
-		return -ENODEV;
-
 	if (dev->rc_map.name)
 		ADD_HOTPLUG_VAR("NAME=%s", dev->rc_map.name);
 	if (dev->driver_name)
@@ -1430,12 +1427,12 @@ void rc_unregister_device(struct rc_dev *dev)
 	if (!dev)
 		return;
 
-	del_timer_sync(&dev->timer_keyup);
-
 	clear_bit(dev->devno, ir_core_dev_number);
 
 	if (dev->driver_type == RC_DRIVER_IR_RAW)
 		ir_raw_event_unregister(dev);
+
+	del_timer_sync(&dev->timer_keyup);
 
 	/* Freeing the table should also call the stop callback */
 	ir_free_table(&dev->rc_map);

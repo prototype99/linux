@@ -343,11 +343,20 @@ mwifiex_cfg80211_set_tx_power(struct wiphy *wiphy,
 	struct mwifiex_power_cfg power_cfg;
 	int dbm = MBM_TO_DBM(mbm);
 
-	if (type == NL80211_TX_POWER_FIXED) {
+	switch (type) {
+	case NL80211_TX_POWER_FIXED:
 		power_cfg.is_power_auto = 0;
+		power_cfg.is_power_fixed = 1;
 		power_cfg.power_level = dbm;
-	} else {
+		break;
+	case NL80211_TX_POWER_LIMITED:
+		power_cfg.is_power_auto = 0;
+		power_cfg.is_power_fixed = 0;
+		power_cfg.power_level = dbm;
+		break;
+	case NL80211_TX_POWER_AUTOMATIC:
 		power_cfg.is_power_auto = 1;
+		break;
 	}
 
 	priv = mwifiex_get_priv(adapter, MWIFIEX_BSS_ROLE_ANY);
@@ -1734,8 +1743,9 @@ done:
 			is_scanning_required = 1;
 		} else {
 			dev_dbg(priv->adapter->dev,
-				"info: trying to associate to '%s' bssid %pM\n",
-				(char *) req_ssid.ssid, bss->bssid);
+				"info: trying to associate to '%.*s' bssid %pM\n",
+				req_ssid.ssid_len, (char *)req_ssid.ssid,
+				bss->bssid);
 			memcpy(&priv->cfg_bssid, bss->bssid, ETH_ALEN);
 			break;
 		}
@@ -1776,8 +1786,8 @@ mwifiex_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
 		return -EINVAL;
 	}
 
-	wiphy_dbg(wiphy, "info: Trying to associate to %s and bssid %pM\n",
-		  (char *) sme->ssid, sme->bssid);
+	wiphy_dbg(wiphy, "info: Trying to associate to %.*s and bssid %pM\n",
+		  (int)sme->ssid_len, (char *)sme->ssid, sme->bssid);
 
 	ret = mwifiex_cfg80211_assoc(priv, sme->ssid_len, sme->ssid, sme->bssid,
 				     priv->bss_mode, sme->channel, sme, 0);
@@ -1900,8 +1910,8 @@ mwifiex_cfg80211_join_ibss(struct wiphy *wiphy, struct net_device *dev,
 		goto done;
 	}
 
-	wiphy_dbg(wiphy, "info: trying to join to %s and bssid %pM\n",
-		  (char *) params->ssid, params->bssid);
+	wiphy_dbg(wiphy, "info: trying to join to %.*s and bssid %pM\n",
+		  params->ssid_len, (char *)params->ssid, params->bssid);
 
 	mwifiex_set_ibss_params(priv, params);
 
@@ -2159,6 +2169,7 @@ struct wireless_dev *mwifiex_add_virtual_intf(struct wiphy *wiphy,
 	struct net_device *dev;
 	void *mdev_priv;
 	struct wireless_dev *wdev;
+	int ret;
 
 	if (!adapter)
 		return ERR_PTR(-EFAULT);
@@ -2253,8 +2264,8 @@ struct wireless_dev *mwifiex_add_virtual_intf(struct wiphy *wiphy,
 		priv->bss_num = 0;
 
 		if (mwifiex_cfg80211_init_p2p_client(priv)) {
-			wdev = ERR_PTR(-EFAULT);
-			goto done;
+			ret = -EFAULT;
+			goto err_set_bss_mode;
 		}
 
 		break;
@@ -2267,9 +2278,8 @@ struct wireless_dev *mwifiex_add_virtual_intf(struct wiphy *wiphy,
 			       ether_setup, IEEE80211_NUM_ACS, 1);
 	if (!dev) {
 		wiphy_err(wiphy, "no memory available for netdevice\n");
-		priv->bss_mode = NL80211_IFTYPE_UNSPECIFIED;
-		wdev = ERR_PTR(-ENOMEM);
-		goto done;
+		ret = -ENOMEM;
+		goto err_alloc_netdev;
 	}
 
 	mwifiex_init_priv_params(priv, dev);
@@ -2304,17 +2314,14 @@ struct wireless_dev *mwifiex_add_virtual_intf(struct wiphy *wiphy,
 
 	SET_NETDEV_DEV(dev, adapter->dev);
 
+	sema_init(&priv->async_sem, 1);
+
 	/* Register network device */
 	if (register_netdevice(dev)) {
 		wiphy_err(wiphy, "cannot register virtual network device\n");
-		free_netdev(dev);
-		priv->bss_mode = NL80211_IFTYPE_UNSPECIFIED;
-		priv->netdev = NULL;
-		wdev = ERR_PTR(-EFAULT);
-		goto done;
+		ret = -EFAULT;
+		goto err_reg_netdev;
 	}
-
-	sema_init(&priv->async_sem, 1);
 
 	dev_dbg(adapter->dev, "info: %s: Marvell 802.11 Adapter\n", dev->name);
 
@@ -2322,13 +2329,17 @@ struct wireless_dev *mwifiex_add_virtual_intf(struct wiphy *wiphy,
 	mwifiex_dev_debugfs_init(priv);
 #endif
 
-done:
-	if (IS_ERR(wdev)) {
-		kfree(priv->wdev);
-		priv->wdev = NULL;
-	}
-
 	return wdev;
+
+err_reg_netdev:
+	free_netdev(dev);
+	priv->netdev = NULL;
+err_set_bss_mode:
+err_alloc_netdev:
+	kfree(priv->wdev);
+	priv->wdev = NULL;
+	priv->bss_mode = NL80211_IFTYPE_UNSPECIFIED;
+	return ERR_PTR(ret);
 }
 EXPORT_SYMBOL_GPL(mwifiex_add_virtual_intf);
 
@@ -2905,6 +2916,10 @@ int mwifiex_register_cfg80211(struct mwifiex_adapter *adapter)
 	/* Initialize cipher suits */
 	wiphy->cipher_suites = mwifiex_cipher_suites;
 	wiphy->n_cipher_suites = ARRAY_SIZE(mwifiex_cipher_suites);
+
+	if (adapter->region_code)
+		wiphy->regulatory_flags |= REGULATORY_DISABLE_BEACON_HINTS |
+					   REGULATORY_COUNTRY_IE_IGNORE;
 
 	memcpy(wiphy->perm_addr, priv->curr_addr, ETH_ALEN);
 	wiphy->signal_type = CFG80211_SIGNAL_TYPE_MBM;

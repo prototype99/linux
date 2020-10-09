@@ -95,8 +95,8 @@ unsigned int iio_buffer_poll(struct file *filp,
 	struct iio_dev *indio_dev = filp->private_data;
 	struct iio_buffer *rb = indio_dev->buffer;
 
-	if (!indio_dev->info)
-		return -ENODEV;
+	if (!indio_dev->info || rb == NULL)
+		return 0;
 
 	poll_wait(filp, &rb->pollq, wait);
 	if (iio_buffer_data_available(rb))
@@ -478,7 +478,7 @@ static int iio_compute_scan_bytes(struct iio_dev *indio_dev,
 {
 	const struct iio_chan_spec *ch;
 	unsigned bytes = 0;
-	int length, i;
+	int length, i, largest = 0;
 
 	/* How much space will the demuxed element take? */
 	for_each_set_bit(i, mask,
@@ -491,6 +491,7 @@ static int iio_compute_scan_bytes(struct iio_dev *indio_dev,
 			length = ch->scan_type.storagebits / 8;
 		bytes = ALIGN(bytes, length);
 		bytes += length;
+		largest = max(largest, length);
 	}
 	if (timestamp) {
 		ch = iio_find_channel_from_si(indio_dev,
@@ -502,7 +503,10 @@ static int iio_compute_scan_bytes(struct iio_dev *indio_dev,
 			length = ch->scan_type.storagebits / 8;
 		bytes = ALIGN(bytes, length);
 		bytes += length;
+		largest = max(largest, length);
 	}
+
+	bytes = ALIGN(bytes, largest);
 	return bytes;
 }
 
@@ -836,14 +840,12 @@ int iio_scan_mask_set(struct iio_dev *indio_dev,
 	const unsigned long *mask;
 	unsigned long *trialmask;
 
-	trialmask = kmalloc(sizeof(*trialmask)*
-			    BITS_TO_LONGS(indio_dev->masklength),
-			    GFP_KERNEL);
-
+	trialmask = kcalloc(BITS_TO_LONGS(indio_dev->masklength),
+			    sizeof(*trialmask), GFP_KERNEL);
 	if (trialmask == NULL)
 		return -ENOMEM;
 	if (!indio_dev->masklength) {
-		WARN_ON("Trying to set scanmask prior to registering buffer\n");
+		WARN(1, "Trying to set scanmask prior to registering buffer\n");
 		goto err_invalid_mask;
 	}
 	bitmap_copy(trialmask, buffer->scan_mask, indio_dev->masklength);

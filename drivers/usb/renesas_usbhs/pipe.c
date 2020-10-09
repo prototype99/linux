@@ -263,6 +263,21 @@ int usbhs_pipe_is_accessible(struct usbhs_pipe *pipe)
 	return -EBUSY;
 }
 
+bool usbhs_pipe_contains_transmittable_data(struct usbhs_pipe *pipe)
+{
+	u16 val;
+
+	/* Do not support for DCP pipe */
+	if (usbhs_pipe_is_dcp(pipe))
+		return false;
+
+	val = usbhsp_pipectrl_get(pipe);
+	if (val & INBUFM)
+		return true;
+
+	return false;
+}
+
 /*
  *		PID ctrl
  */
@@ -640,6 +655,11 @@ static struct usbhs_pipe *usbhsp_get_pipe(struct usbhs_priv *priv, u32 type)
 	return pipe;
 }
 
+static void usbhsp_put_pipe(struct usbhs_pipe *pipe)
+{
+	usbhsp_flags_init(pipe);
+}
+
 void usbhs_pipe_init(struct usbhs_priv *priv,
 		     int (*dma_map_ctrl)(struct usbhs_pkt *pkt, int map))
 {
@@ -724,6 +744,11 @@ struct usbhs_pipe *usbhs_pipe_malloc(struct usbhs_priv *priv,
 	 */
 
 	return pipe;
+}
+
+void usbhs_pipe_free(struct usbhs_pipe *pipe)
+{
+	usbhsp_put_pipe(pipe);
 }
 
 void usbhs_pipe_select_fifo(struct usbhs_pipe *pipe, struct usbhs_fifo *fifo)

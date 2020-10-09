@@ -105,15 +105,24 @@ struct dst_entry {
 	};
 };
 
+void *dst_alloc_metrics(gfp_t flags);
+void dst_free_metrics(void *metrics);
 u32 *dst_cow_metrics_generic(struct dst_entry *dst, unsigned long old);
-extern const u32 dst_default_metrics[];
 
 #define DST_METRICS_READ_ONLY		0x1UL
 #define DST_METRICS_FORCE_OVERWRITE	0x2UL
-#define DST_METRICS_FLAGS		0x3UL
+#define DST_METRICS_REFCOUNTED		0x4UL
+#define DST_METRICS_FLAGS		0x7UL
+#define DST_METRICS_ALIGNMENT		0x8UL
 #define __DST_METRICS_PTR(Y)	\
 	((u32 *)((Y) & ~DST_METRICS_FLAGS))
 #define DST_METRICS_PTR(X)	__DST_METRICS_PTR((X)->_metrics)
+
+struct dst_metrics {
+	u32		metrics[RTAX_MAX];
+	atomic_t	refcnt;
+} __aligned(DST_METRICS_ALIGNMENT);
+extern const struct dst_metrics dst_default_metrics;
 
 static inline bool dst_metrics_read_only(const struct dst_entry *dst)
 {
@@ -341,6 +350,7 @@ static inline void __skb_tunnel_rx(struct sk_buff *skb, struct net_device *dev,
  *	skb_tunnel_rx - prepare skb for rx reinsert
  *	@skb: buffer
  *	@dev: tunnel device
+ *	@net: netns for packet i/o
  *
  *	After decapsulation, packet is going to re-enter (netif_rx()) our stack,
  *	so make some cleanups, and perform accounting.
@@ -480,6 +490,8 @@ void dst_init(void);
 /* Flags for xfrm_lookup flags argument. */
 enum {
 	XFRM_LOOKUP_ICMP = 1 << 0,
+	XFRM_LOOKUP_QUEUE = 1 << 1,
+	XFRM_LOOKUP_KEEP_DST_REF = 1 << 2,
 };
 
 struct flowi;
@@ -490,7 +502,16 @@ static inline struct dst_entry *xfrm_lookup(struct net *net,
 					    int flags)
 {
 	return dst_orig;
-} 
+}
+
+static inline struct dst_entry *xfrm_lookup_route(struct net *net,
+						  struct dst_entry *dst_orig,
+						  const struct flowi *fl,
+						  struct sock *sk,
+						  int flags)
+{
+	return dst_orig;
+}
 
 static inline struct xfrm_state *dst_xfrm(const struct dst_entry *dst)
 {
@@ -501,6 +522,10 @@ static inline struct xfrm_state *dst_xfrm(const struct dst_entry *dst)
 struct dst_entry *xfrm_lookup(struct net *net, struct dst_entry *dst_orig,
 			      const struct flowi *fl, struct sock *sk,
 			      int flags);
+
+struct dst_entry *xfrm_lookup_route(struct net *net, struct dst_entry *dst_orig,
+				    const struct flowi *fl, struct sock *sk,
+				    int flags);
 
 /* skb attached with this dst needs transformation if dst->xfrm is valid */
 static inline struct xfrm_state *dst_xfrm(const struct dst_entry *dst)

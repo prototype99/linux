@@ -44,6 +44,7 @@
 #include <linux/io.h>
 #include <linux/reboot.h>
 #include <linux/bcd.h>
+#include <linux/acpi.h>
 
 #include <asm/setup.h>
 #include <asm/efi.h>
@@ -235,12 +236,19 @@ static efi_status_t __init phys_efi_set_virtual_address_map(
 	efi_memory_desc_t *virtual_map)
 {
 	efi_status_t status;
+	unsigned long flags;
 
 	efi_call_phys_prelog();
+
+	/* Disable interrupts around EFI calls: */
+	local_irq_save(flags);
 	status = efi_call_phys(efi_phys.set_virtual_address_map,
 			       memory_map_size, descriptor_size,
 			       descriptor_version, virtual_map);
+	local_irq_restore(flags);
+
 	efi_call_phys_epilog();
+
 	return status;
 }
 
@@ -427,7 +435,7 @@ void __init efi_unmap_memmap(void)
 {
 	clear_bit(EFI_MEMMAP, &efi.flags);
 	if (memmap.map) {
-		early_iounmap(memmap.map, memmap.nr_map * memmap.desc_size);
+		early_memunmap(memmap.map, memmap.nr_map * memmap.desc_size);
 		memmap.map = NULL;
 	}
 }
@@ -467,12 +475,12 @@ static int __init efi_systab_init(void *phys)
 			if (!data)
 				return -ENOMEM;
 		}
-		systab64 = early_ioremap((unsigned long)phys,
+		systab64 = early_memremap((unsigned long)phys,
 					 sizeof(*systab64));
 		if (systab64 == NULL) {
 			pr_err("Couldn't map the system table!\n");
 			if (data)
-				early_iounmap(data, sizeof(*data));
+				early_memunmap(data, sizeof(*data));
 			return -ENOMEM;
 		}
 
@@ -504,9 +512,9 @@ static int __init efi_systab_init(void *phys)
 					   systab64->tables;
 		tmp |= data ? data->tables : systab64->tables;
 
-		early_iounmap(systab64, sizeof(*systab64));
+		early_memunmap(systab64, sizeof(*systab64));
 		if (data)
-			early_iounmap(data, sizeof(*data));
+			early_memunmap(data, sizeof(*data));
 #ifdef CONFIG_X86_32
 		if (tmp >> 32) {
 			pr_err("EFI data located above 4GB, disabling EFI.\n");
@@ -516,7 +524,7 @@ static int __init efi_systab_init(void *phys)
 	} else {
 		efi_system_table_32_t *systab32;
 
-		systab32 = early_ioremap((unsigned long)phys,
+		systab32 = early_memremap((unsigned long)phys,
 					 sizeof(*systab32));
 		if (systab32 == NULL) {
 			pr_err("Couldn't map the system table!\n");
@@ -537,7 +545,7 @@ static int __init efi_systab_init(void *phys)
 		efi_systab.nr_tables = systab32->nr_tables;
 		efi_systab.tables = systab32->tables;
 
-		early_iounmap(systab32, sizeof(*systab32));
+		early_memunmap(systab32, sizeof(*systab32));
 	}
 
 	efi.systab = &efi_systab;
@@ -563,7 +571,7 @@ static int __init efi_runtime_init32(void)
 {
 	efi_runtime_services_32_t *runtime;
 
-	runtime = early_ioremap((unsigned long)efi.systab->runtime,
+	runtime = early_memremap((unsigned long)efi.systab->runtime,
 			sizeof(efi_runtime_services_32_t));
 	if (!runtime) {
 		pr_err("Could not map the runtime service table!\n");
@@ -578,7 +586,7 @@ static int __init efi_runtime_init32(void)
 	efi_phys.set_virtual_address_map =
 			(efi_set_virtual_address_map_t *)
 			(unsigned long)runtime->set_virtual_address_map;
-	early_iounmap(runtime, sizeof(efi_runtime_services_32_t));
+	early_memunmap(runtime, sizeof(efi_runtime_services_32_t));
 
 	return 0;
 }
@@ -587,7 +595,7 @@ static int __init efi_runtime_init64(void)
 {
 	efi_runtime_services_64_t *runtime;
 
-	runtime = early_ioremap((unsigned long)efi.systab->runtime,
+	runtime = early_memremap((unsigned long)efi.systab->runtime,
 			sizeof(efi_runtime_services_64_t));
 	if (!runtime) {
 		pr_err("Could not map the runtime service table!\n");
@@ -602,7 +610,7 @@ static int __init efi_runtime_init64(void)
 	efi_phys.set_virtual_address_map =
 			(efi_set_virtual_address_map_t *)
 			(unsigned long)runtime->set_virtual_address_map;
-	early_iounmap(runtime, sizeof(efi_runtime_services_64_t));
+	early_memunmap(runtime, sizeof(efi_runtime_services_64_t));
 
 	return 0;
 }
@@ -633,7 +641,7 @@ static int __init efi_runtime_init(void)
 static int __init efi_memmap_init(void)
 {
 	/* Map the EFI memory map */
-	memmap.map = early_ioremap((unsigned long)memmap.phys_map,
+	memmap.map = early_memremap((unsigned long)memmap.phys_map,
 				   memmap.nr_map * memmap.desc_size);
 	if (memmap.map == NULL) {
 		pr_err("Could not map the memory map!\n");
@@ -710,7 +718,6 @@ void __init efi_init(void)
 	efi_char16_t *c16;
 	char vendor[100] = "unknown";
 	int i = 0;
-	void *tmp;
 
 #ifdef CONFIG_X86_32
 	if (boot_params.efi_info.efi_systab_hi ||
@@ -737,14 +744,16 @@ void __init efi_init(void)
 	/*
 	 * Show what we know for posterity
 	 */
-	c16 = tmp = early_ioremap(efi.systab->fw_vendor, 2);
+	c16 = early_memremap(efi.systab->fw_vendor,
+			     sizeof(vendor) * sizeof(efi_char16_t));
 	if (c16) {
-		for (i = 0; i < sizeof(vendor) - 1 && *c16; ++i)
-			vendor[i] = *c16++;
+		for (i = 0; i < sizeof(vendor) - 1 && c16[i]; ++i)
+			vendor[i] = c16[i];
 		vendor[i] = '\0';
-	} else
+		early_memunmap(c16, sizeof(vendor) * sizeof(efi_char16_t));
+	} else {
 		pr_err("Could not map the firmware vendor!\n");
-	early_iounmap(tmp, 2);
+	}
 
 	pr_info("EFI v%u.%.02u by %s\n",
 		efi.systab->hdr.revision >> 16,
@@ -967,6 +976,70 @@ out:
 }
 
 /*
+ * Iterate the EFI memory map in reverse order because the regions
+ * will be mapped top-down. The end result is the same as if we had
+ * mapped things forward, but doesn't require us to change the
+ * existing implementation of efi_map_region().
+ */
+static inline void *efi_map_next_entry_reverse(void *entry)
+{
+	/* Initial call */
+	if (!entry)
+		return memmap.map_end - memmap.desc_size;
+
+	entry -= memmap.desc_size;
+	if (entry < memmap.map)
+		return NULL;
+
+	return entry;
+}
+
+/*
+ * efi_map_next_entry - Return the next EFI memory map descriptor
+ * @entry: Previous EFI memory map descriptor
+ *
+ * This is a helper function to iterate over the EFI memory map, which
+ * we do in different orders depending on the current configuration.
+ *
+ * To begin traversing the memory map @entry must be %NULL.
+ *
+ * Returns %NULL when we reach the end of the memory map.
+ */
+static void *efi_map_next_entry(void *entry)
+{
+	if (!efi_enabled(EFI_OLD_MEMMAP) && efi_enabled(EFI_64BIT)) {
+		/*
+		 * Starting in UEFI v2.5 the EFI_PROPERTIES_TABLE
+		 * config table feature requires us to map all entries
+		 * in the same order as they appear in the EFI memory
+		 * map. That is to say, entry N must have a lower
+		 * virtual address than entry N+1. This is because the
+		 * firmware toolchain leaves relative references in
+		 * the code/data sections, which are split and become
+		 * separate EFI memory regions. Mapping things
+		 * out-of-order leads to the firmware accessing
+		 * unmapped addresses.
+		 *
+		 * Since we need to map things this way whether or not
+		 * the kernel actually makes use of
+		 * EFI_PROPERTIES_TABLE, let's just switch to this
+		 * scheme by default for 64-bit.
+		 */
+		return efi_map_next_entry_reverse(entry);
+	}
+
+	/* Initial call */
+	if (!entry)
+		return memmap.map;
+
+	entry += memmap.desc_size;
+	if (entry >= memmap.map_end)
+		return NULL;
+
+	return entry;
+}
+
+/*
  * Map the efi memory ranges of the runtime services and update new_mmap with
  * virtual addresses.
  */
@@ -976,7 +1049,8 @@ static void * __init efi_map_regions(int *count, int *pg_shift)
 	unsigned long left = 0;
 	efi_memory_desc_t *md;
 
-	for (p = memmap.map; p < memmap.map_end; p += memmap.desc_size) {
+	p = NULL;
+	while ((p = efi_map_next_entry(p))) {
 		md = p;
 		if (!(md->attribute & EFI_MEMORY_RUNTIME)) {
 #ifdef CONFIG_X86_64
@@ -1339,4 +1413,26 @@ void __init efi_apply_memmap_quirks(void)
 	 */
 	if (is_uv_system())
 		set_bit(EFI_OLD_MEMMAP, &efi.flags);
+}
+
+/*
+ * For most modern platforms the preferred method of powering off is via
+ * ACPI. However, there are some that are known to require the use of
+ * EFI runtime services and for which ACPI does not work at all.
+ *
+ * Using EFI is a last resort, to be used only if no other option
+ * exists.
+ */
+bool efi_reboot_required(void)
+{
+	if (!acpi_gbl_reduced_hardware)
+		return false;
+
+	efi_reboot_quirk_mode = EFI_RESET_WARM;
+	return true;
+}
+
+bool efi_poweroff_required(void)
+{
+	return !!acpi_gbl_reduced_hardware;
 }

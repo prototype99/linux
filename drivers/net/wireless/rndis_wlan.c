@@ -356,9 +356,9 @@ struct ndis_80211_pmkid {
 #define CAP_MODE_80211G		4
 #define CAP_MODE_MASK		7
 
-#define WORK_LINK_UP		(1<<0)
-#define WORK_LINK_DOWN		(1<<1)
-#define WORK_SET_MULTICAST_LIST	(1<<2)
+#define WORK_LINK_UP		0
+#define WORK_LINK_DOWN		1
+#define WORK_SET_MULTICAST_LIST	2
 
 #define RNDIS_WLAN_ALG_NONE	0
 #define RNDIS_WLAN_ALG_WEP	(1<<0)
@@ -2917,6 +2917,8 @@ static void rndis_wlan_auth_indication(struct usbnet *usbdev,
 
 	while (buflen >= sizeof(*auth_req)) {
 		auth_req = (void *)buf;
+		if (buflen < le32_to_cpu(auth_req->length))
+			return;
 		type = "unknown";
 		flags = le32_to_cpu(auth_req->flags);
 		pairwise_error = false;

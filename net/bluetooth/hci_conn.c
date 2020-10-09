@@ -484,7 +484,7 @@ int hci_conn_del(struct hci_conn *conn)
 		/* Unacked frames */
 		hdev->acl_cnt += conn->sent;
 	} else if (conn->type == LE_LINK) {
-		cancel_delayed_work_sync(&conn->le_conn_timeout);
+		cancel_delayed_work(&conn->le_conn_timeout);
 
 		if (hdev->le_pkts)
 			hdev->le_cnt += conn->sent;
@@ -980,8 +980,16 @@ auth:
 		return 0;
 
 encrypt:
-	if (conn->link_mode & HCI_LM_ENCRYPT)
+	if (conn->link_mode & HCI_LM_ENCRYPT) {
+		/* Ensure that the encryption key size has been read,
+		 * otherwise stall the upper layer responses.
+		 */
+		if (!conn->enc_key_size)
+			return 0;
+
+		/* Nothing else needed, all requirements are met */
 		return 1;
+	}
 
 	hci_conn_encrypt(conn);
 	return 0;

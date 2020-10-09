@@ -24,19 +24,19 @@
 #if defined(CONFIG_DEBUG_ICEDCC)
 
 #if defined(CONFIG_CPU_V6) || defined(CONFIG_CPU_V6K) || defined(CONFIG_CPU_V7)
-		.macro	loadsp, rb, tmp
+		.macro	loadsp, rb, tmp1, tmp2
 		.endm
 		.macro	writeb, ch, rb
 		mcr	p14, 0, \ch, c0, c5, 0
 		.endm
 #elif defined(CONFIG_CPU_XSCALE)
-		.macro	loadsp, rb, tmp
+		.macro	loadsp, rb, tmp1, tmp2
 		.endm
 		.macro	writeb, ch, rb
 		mcr	p14, 0, \ch, c8, c0, 0
 		.endm
 #else
-		.macro	loadsp, rb, tmp
+		.macro	loadsp, rb, tmp1, tmp2
 		.endm
 		.macro	writeb, ch, rb
 		mcr	p14, 0, \ch, c1, c0, 0
@@ -52,7 +52,7 @@
 		.endm
 
 #if defined(CONFIG_ARCH_SA1100)
-		.macro	loadsp, rb, tmp
+		.macro	loadsp, rb, tmp1, tmp2
 		mov	\rb, #0x80000000	@ physical base address
 #ifdef CONFIG_DEBUG_LL_SER3
 		add	\rb, \rb, #0x00050000	@ Ser3
@@ -61,8 +61,8 @@
 #endif
 		.endm
 #else
-		.macro	loadsp,	rb, tmp
-		addruart \rb, \tmp
+		.macro	loadsp,	rb, tmp1, tmp2
+		addruart \rb, \tmp1, \tmp2
 		.endm
 #endif
 #endif
@@ -395,8 +395,7 @@ dtb_check_done:
 		add	sp, sp, r6
 #endif
 
-		tst	r4, #1
-		bleq	cache_clean_flush
+		bl	cache_clean_flush
 
 		adr	r0, BSYM(restart)
 		add	r0, r0, r6
@@ -727,7 +726,7 @@ __armv7_mmu_cache_on:
 		orrne	r0, r0, #1		@ MMU enabled
 		movne	r1, #0xfffffffd		@ domain 0 = client
 		bic     r6, r6, #1 << 31        @ 32-bit translation system
-		bic     r6, r6, #3 << 0         @ use only ttbr0
+		bic     r6, r6, #(7 << 0) | (1 << 4)	@ use only ttbr0
 		mcrne	p15, 0, r3, c2, c0, 0	@ load page table pointer
 		mcrne	p15, 0, r1, c3, c0, 0	@ load domain access control
 		mcrne   p15, 0, r6, c2, c0, 2   @ load ttb control
@@ -1045,6 +1044,8 @@ cache_clean_flush:
 		b	call_cache_fn
 
 __armv4_mpu_cache_flush:
+		tst	r4, #1
+		movne	pc, lr
 		mov	r2, #1
 		mov	r3, #0
 		mcr	p15, 0, ip, c7, c6, 0	@ invalidate D cache
@@ -1062,6 +1063,8 @@ __armv4_mpu_cache_flush:
 		mov	pc, lr
 		
 __fa526_cache_flush:
+		tst	r4, #1
+		movne	pc, lr
 		mov	r1, #0
 		mcr	p15, 0, r1, c7, c14, 0	@ clean and invalidate D cache
 		mcr	p15, 0, r1, c7, c5, 0	@ flush I cache
@@ -1070,13 +1073,16 @@ __fa526_cache_flush:
 
 __armv6_mmu_cache_flush:
 		mov	r1, #0
-		mcr	p15, 0, r1, c7, c14, 0	@ clean+invalidate D
+		tst	r4, #1
+		mcreq	p15, 0, r1, c7, c14, 0	@ clean+invalidate D
 		mcr	p15, 0, r1, c7, c5, 0	@ invalidate I+BTB
-		mcr	p15, 0, r1, c7, c15, 0	@ clean+invalidate unified
+		mcreq	p15, 0, r1, c7, c15, 0	@ clean+invalidate unified
 		mcr	p15, 0, r1, c7, c10, 4	@ drain WB
 		mov	pc, lr
 
 __armv7_mmu_cache_flush:
+		tst	r4, #1
+		bne	iflush
 		mrc	p15, 0, r10, c0, c1, 5	@ read ID_MMFR1
 		tst	r10, #0xf << 16		@ hierarchical cache (ARMv7)
 		mov	r10, #0
@@ -1137,6 +1143,8 @@ iflush:
 		mov	pc, lr
 
 __armv5tej_mmu_cache_flush:
+		tst	r4, #1
+		movne	pc, lr
 1:		mrc	p15, 0, r15, c7, c14, 3	@ test,clean,invalidate D cache
 		bne	1b
 		mcr	p15, 0, r0, c7, c5, 0	@ flush I cache
@@ -1144,6 +1152,8 @@ __armv5tej_mmu_cache_flush:
 		mov	pc, lr
 
 __armv4_mmu_cache_flush:
+		tst	r4, #1
+		movne	pc, lr
 		mov	r2, #64*1024		@ default: 32K dcache size (*2)
 		mov	r11, #32		@ default: 32 byte line size
 		mrc	p15, 0, r3, c0, c0, 1	@ read cache type
@@ -1177,6 +1187,8 @@ no_cache_id:
 
 __armv3_mmu_cache_flush:
 __armv3_mpu_cache_flush:
+		tst	r4, #1
+		movne	pc, lr
 		mov	r1, #0
 		mcr	p15, 0, r1, c7, c0, 0	@ invalidate whole cache v3
 		mov	pc, lr
@@ -1207,7 +1219,7 @@ phex:		adr	r3, phexbuf
 		b	1b
 
 @ puts corrupts {r0, r1, r2, r3}
-puts:		loadsp	r3, r1
+puts:		loadsp	r3, r2, r1
 1:		ldrb	r2, [r0], #1
 		teq	r2, #0
 		moveq	pc, lr
@@ -1224,8 +1236,8 @@ puts:		loadsp	r3, r1
 @ putc corrupts {r0, r1, r2, r3}
 putc:
 		mov	r2, r0
+		loadsp	r3, r1, r0
 		mov	r0, #0
-		loadsp	r3, r1
 		b	2b
 
 @ memdump corrupts {r0, r1, r2, r3, r10, r11, r12, lr}

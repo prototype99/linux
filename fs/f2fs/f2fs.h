@@ -489,6 +489,9 @@ struct f2fs_sb_info {
 	struct f2fs_gc_kthread	*gc_thread;	/* GC thread */
 	unsigned int cur_victim_sec;		/* current victim section num */
 
+	/* threshold for converting bg victims for fg */
+	u64 fggc_threshold;
+
 	/* maximum # of trials to find a victim segment for SSR and GC */
 	unsigned int max_victim_search;
 
@@ -1118,6 +1121,7 @@ void update_inode(struct inode *, struct page *);
 void update_inode_page(struct inode *);
 int f2fs_write_inode(struct inode *, struct writeback_control *);
 void f2fs_evict_inode(struct inode *);
+void handle_failed_inode(struct inode *);
 
 /*
  * namei.c

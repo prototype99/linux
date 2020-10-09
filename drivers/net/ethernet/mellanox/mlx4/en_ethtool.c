@@ -142,6 +142,7 @@ static void mlx4_en_get_wol(struct net_device *netdev,
 			    struct ethtool_wolinfo *wol)
 {
 	struct mlx4_en_priv *priv = netdev_priv(netdev);
+	struct mlx4_caps *caps = &priv->mdev->dev->caps;
 	int err = 0;
 	u64 config = 0;
 	u64 mask;
@@ -154,11 +155,16 @@ static void mlx4_en_get_wol(struct net_device *netdev,
 	mask = (priv->port == 1) ? MLX4_DEV_CAP_FLAG_WOL_PORT1 :
 		MLX4_DEV_CAP_FLAG_WOL_PORT2;
 
-	if (!(priv->mdev->dev->caps.flags & mask)) {
+	if (!(caps->flags & mask)) {
 		wol->supported = 0;
 		wol->wolopts = 0;
 		return;
 	}
+
+	if (caps->wol_port[priv->port])
+		wol->supported = WAKE_MAGIC;
+	else
+		wol->supported = 0;
 
 	err = mlx4_wol_read(priv->mdev->dev, &config, priv->port);
 	if (err) {
@@ -166,12 +172,7 @@ static void mlx4_en_get_wol(struct net_device *netdev,
 		return;
 	}
 
-	if (config & MLX4_EN_WOL_MAGIC)
-		wol->supported = WAKE_MAGIC;
-	else
-		wol->supported = 0;
-
-	if (config & MLX4_EN_WOL_ENABLED)
+	if ((config & MLX4_EN_WOL_ENABLED) && (config & MLX4_EN_WOL_MAGIC))
 		wol->wolopts = WAKE_MAGIC;
 	else
 		wol->wolopts = 0;
@@ -440,6 +441,22 @@ static int mlx4_en_set_coalesce(struct net_device *dev,
 	if (!coal->tx_max_coalesced_frames_irq)
 		return -EINVAL;
 
+	if (coal->tx_coalesce_usecs > MLX4_EN_MAX_COAL_TIME ||
+	    coal->rx_coalesce_usecs > MLX4_EN_MAX_COAL_TIME ||
+	    coal->rx_coalesce_usecs_low > MLX4_EN_MAX_COAL_TIME ||
+	    coal->rx_coalesce_usecs_high > MLX4_EN_MAX_COAL_TIME) {
+		netdev_info(dev, "%s: maximum coalesce time supported is %d usecs\n",
+			    __func__, MLX4_EN_MAX_COAL_TIME);
+		return -ERANGE;
+	}
+
+	if (coal->tx_max_coalesced_frames > MLX4_EN_MAX_COAL_PKTS ||
+	    coal->rx_max_coalesced_frames > MLX4_EN_MAX_COAL_PKTS) {
+		netdev_info(dev, "%s: maximum coalesced frames supported is %d\n",
+			    __func__, MLX4_EN_MAX_COAL_PKTS);
+		return -ERANGE;
+	}
+
 	priv->rx_frames = (coal->rx_max_coalesced_frames ==
 			   MLX4_EN_AUTO_CONF) ?
 				MLX4_EN_RX_COAL_TARGET :
@@ -473,18 +490,29 @@ static int mlx4_en_set_pauseparam(struct net_device *dev,
 {
 	struct mlx4_en_priv *priv = netdev_priv(dev);
 	struct mlx4_en_dev *mdev = priv->mdev;
+	u8 tx_pause, tx_ppp, rx_pause, rx_ppp;
 	int err;
 
-	priv->prof->tx_pause = pause->tx_pause != 0;
-	priv->prof->rx_pause = pause->rx_pause != 0;
+	if (pause->autoneg)
+		return -EINVAL;
+
+	tx_pause = !!(pause->tx_pause);
+	rx_pause = !!(pause->rx_pause);
+	rx_ppp = (tx_pause || rx_pause) ? 0 : priv->prof->rx_ppp;
+	tx_ppp = (tx_pause || rx_pause) ? 0 : priv->prof->tx_ppp;
+
 	err = mlx4_SET_PORT_general(mdev->dev, priv->port,
 				    priv->rx_skb_size + ETH_FCS_LEN,
-				    priv->prof->tx_pause,
-				    priv->prof->tx_ppp,
-				    priv->prof->rx_pause,
-				    priv->prof->rx_ppp);
-	if (err)
-		en_err(priv, "Failed setting pause params\n");
+				    tx_pause, tx_ppp, rx_pause, rx_ppp);
+	if (err) {
+		en_err(priv, "Failed setting pause params, err = %d\n", err);
+		return err;
+	}
+
+	priv->prof->tx_pause = tx_pause;
+	priv->prof->rx_pause = rx_pause;
+	priv->prof->tx_ppp = tx_ppp;
+	priv->prof->rx_ppp = rx_ppp;
 
 	return err;
 }

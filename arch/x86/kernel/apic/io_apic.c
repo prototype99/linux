@@ -2377,9 +2377,10 @@ static bool io_apic_level_ack_pending(struct irq_cfg *cfg)
 
 static inline bool ioapic_irqd_mask(struct irq_data *data, struct irq_cfg *cfg)
 {
-	/* If we are moving the irq we need to mask it */
+	/* If we are moving the IRQ we need to mask it */
 	if (unlikely(irqd_is_setaffinity_pending(data))) {
-		mask_ioapic(cfg);
+		if (!irqd_irq_masked(data))
+			mask_ioapic(cfg);
 		return true;
 	}
 	return false;
@@ -2417,7 +2418,9 @@ static inline void ioapic_irqd_unmask(struct irq_data *data,
 		 */
 		if (!io_apic_level_ack_pending(cfg))
 			irq_move_masked_irq(data);
-		unmask_ioapic(cfg);
+		/* If the IRQ is masked in the core, leave it: */
+		if (!irqd_irq_masked(data))
+			unmask_ioapic(cfg);
 	}
 }
 #else
@@ -3538,6 +3541,7 @@ void __init setup_ioapic_dest(void)
 {
 	int pin, ioapic, irq, irq_entry;
 	const struct cpumask *mask;
+	struct irq_desc *desc;
 	struct irq_data *idata;
 
 	if (skip_ioapic_setup == 1)
@@ -3553,7 +3557,9 @@ void __init setup_ioapic_dest(void)
 		if ((ioapic > 0) && (irq > 16))
 			continue;
 
-		idata = irq_get_irq_data(irq);
+		desc = irq_to_desc(irq);
+		raw_spin_lock_irq(&desc->lock);
+		idata = irq_desc_get_irq_data(desc);
 
 		/*
 		 * Honour affinities which have been set in early boot
@@ -3564,6 +3570,7 @@ void __init setup_ioapic_dest(void)
 			mask = apic->target_cpus();
 
 		x86_io_apic_ops.set_affinity(idata, mask, false);
+		raw_spin_unlock_irq(&desc->lock);
 	}
 
 }

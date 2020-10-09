@@ -173,25 +173,34 @@ static int batadv_interface_tx(struct sk_buff *skb,
 	int gw_mode;
 	enum batadv_forw_mode forw_mode;
 	struct batadv_orig_node *mcast_single_orig = NULL;
+	int network_offset = ETH_HLEN;
 
 	if (atomic_read(&bat_priv->mesh_state) != BATADV_MESH_ACTIVE)
 		goto dropped;
 
 	soft_iface->trans_start = jiffies;
 	vid = batadv_get_vid(skb, 0);
+
+	skb_reset_mac_header(skb);
 	ethhdr = eth_hdr(skb);
 
 	switch (ntohs(ethhdr->h_proto)) {
 	case ETH_P_8021Q:
+		if (!pskb_may_pull(skb, sizeof(*vhdr)))
+			goto dropped;
 		vhdr = vlan_eth_hdr(skb);
 
-		if (vhdr->h_vlan_encapsulated_proto != ethertype)
+		if (vhdr->h_vlan_encapsulated_proto != ethertype) {
+			network_offset += VLAN_HLEN;
 			break;
+		}
 
 		/* fall through */
 	case ETH_P_BATMAN:
 		goto dropped;
 	}
+
+	skb_set_network_header(skb, network_offset);
 
 	if (batadv_bla_tx(bat_priv, skb, vid))
 		goto dropped;
@@ -373,11 +382,17 @@ void batadv_interface_rx(struct net_device *soft_iface,
 	 */
 	nf_reset(skb);
 
+	if (unlikely(!pskb_may_pull(skb, ETH_HLEN)))
+		goto dropped;
+
 	vid = batadv_get_vid(skb, 0);
 	ethhdr = eth_hdr(skb);
 
 	switch (ntohs(ethhdr->h_proto)) {
 	case ETH_P_8021Q:
+		if (!pskb_may_pull(skb, VLAN_ETH_HLEN))
+			goto dropped;
+
 		vhdr = (struct vlan_ethhdr *)skb->data;
 
 		if (vhdr->h_vlan_encapsulated_proto != ethertype)
@@ -389,16 +404,8 @@ void batadv_interface_rx(struct net_device *soft_iface,
 	}
 
 	/* skb->dev & skb->pkt_type are set here */
-	if (unlikely(!pskb_may_pull(skb, ETH_HLEN)))
-		goto dropped;
 	skb->protocol = eth_type_trans(skb, soft_iface);
-
-	/* should not be necessary anymore as we use skb_pull_rcsum()
-	 * TODO: please verify this and remove this TODO
-	 * -- Dec 21st 2009, Simon Wunderlich
-	 */
-
-	/* skb->ip_summed = CHECKSUM_UNNECESSARY; */
+	skb_postpull_rcsum(skb, eth_hdr(skb), ETH_HLEN);
 
 	batadv_inc_counter(bat_priv, BATADV_CNT_RX);
 	batadv_add_counter(bat_priv, BATADV_CNT_RX_BYTES,
@@ -450,6 +457,9 @@ out:
  */
 void batadv_softif_vlan_free_ref(struct batadv_softif_vlan *vlan)
 {
+	if (!vlan)
+		return;
+
 	if (atomic_dec_and_test(&vlan->refcount)) {
 		spin_lock_bh(&vlan->bat_priv->softif_vlan_list_lock);
 		hlist_del_rcu(&vlan->list);
@@ -500,15 +510,20 @@ int batadv_softif_create_vlan(struct batadv_priv *bat_priv, unsigned short vid)
 	struct batadv_softif_vlan *vlan;
 	int err;
 
+	spin_lock_bh(&bat_priv->softif_vlan_list_lock);
+
 	vlan = batadv_softif_vlan_get(bat_priv, vid);
 	if (vlan) {
 		batadv_softif_vlan_free_ref(vlan);
+		spin_unlock_bh(&bat_priv->softif_vlan_list_lock);
 		return -EEXIST;
 	}
 
 	vlan = kzalloc(sizeof(*vlan), GFP_ATOMIC);
-	if (!vlan)
+	if (!vlan) {
+		spin_unlock_bh(&bat_priv->softif_vlan_list_lock);
 		return -ENOMEM;
+	}
 
 	vlan->bat_priv = bat_priv;
 	vlan->vid = vid;
@@ -516,15 +531,22 @@ int batadv_softif_create_vlan(struct batadv_priv *bat_priv, unsigned short vid)
 
 	atomic_set(&vlan->ap_isolation, 0);
 
-	err = batadv_sysfs_add_vlan(bat_priv->soft_iface, vlan);
-	if (err) {
-		kfree(vlan);
-		return err;
-	}
-
-	spin_lock_bh(&bat_priv->softif_vlan_list_lock);
+	atomic_inc(&vlan->refcount);
 	hlist_add_head_rcu(&vlan->list, &bat_priv->softif_vlan_list);
 	spin_unlock_bh(&bat_priv->softif_vlan_list_lock);
+
+	/* batadv_sysfs_add_vlan cannot be in the spinlock section due to the
+	 * sleeping behavior of the sysfs functions and the fs_reclaim lock
+	 */
+	err = batadv_sysfs_add_vlan(bat_priv->soft_iface, vlan);
+	if (err) {
+		/* ref for the function */
+		batadv_softif_vlan_free_ref(vlan);
+
+		/* ref for the list */
+		batadv_softif_vlan_free_ref(vlan);
+		return err;
+	}
 
 	/* add a new TT local entry. This one will be marked with the NOPURGE
 	 * flag
@@ -532,6 +554,9 @@ int batadv_softif_create_vlan(struct batadv_priv *bat_priv, unsigned short vid)
 	batadv_tt_local_add(bat_priv->soft_iface,
 			    bat_priv->soft_iface->dev_addr, vid,
 			    BATADV_NULL_IFINDEX, BATADV_NO_MARK);
+
+	/* don't return reference to new softif_vlan */
+	batadv_softif_vlan_free_ref(vlan);
 
 	return 0;
 }
@@ -963,12 +988,21 @@ void batadv_softif_destroy_sysfs(struct net_device *soft_iface)
 static void batadv_softif_destroy_netlink(struct net_device *soft_iface,
 					  struct list_head *head)
 {
+	struct batadv_priv *bat_priv = netdev_priv(soft_iface);
 	struct batadv_hard_iface *hard_iface;
+	struct batadv_softif_vlan *vlan;
 
 	list_for_each_entry(hard_iface, &batadv_hardif_list, list) {
 		if (hard_iface->soft_iface == soft_iface)
 			batadv_hardif_disable_interface(hard_iface,
 							BATADV_IF_CLEANUP_KEEP);
+	}
+
+	/* destroy the "untagged" VLAN */
+	vlan = batadv_softif_vlan_get(bat_priv, BATADV_NO_FLAGS);
+	if (vlan) {
+		batadv_softif_destroy_vlan(bat_priv, vlan);
+		batadv_softif_vlan_free_ref(vlan);
 	}
 
 	batadv_sysfs_del_meshif(soft_iface);

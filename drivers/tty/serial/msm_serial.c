@@ -316,6 +316,7 @@ static unsigned int msm_get_mctrl(struct uart_port *port)
 static void msm_reset(struct uart_port *port)
 {
 	struct msm_port *msm_port = UART_TO_MSM(port);
+	unsigned int mr;
 
 	/* reset everything */
 	msm_write(port, UART_CR_CMD_RESET_RX, UART_CR);
@@ -323,7 +324,10 @@ static void msm_reset(struct uart_port *port)
 	msm_write(port, UART_CR_CMD_RESET_ERR, UART_CR);
 	msm_write(port, UART_CR_CMD_RESET_BREAK_INT, UART_CR);
 	msm_write(port, UART_CR_CMD_RESET_CTS, UART_CR);
-	msm_write(port, UART_CR_CMD_SET_RFR, UART_CR);
+	msm_write(port, UART_CR_CMD_RESET_RFR, UART_CR);
+	mr = msm_read(port, UART_MR1);
+	mr &= ~UART_MR1_RX_RDY_CTL;
+	msm_write(port, mr, UART_MR1);
 
 	/* Disable DM modes */
 	if (msm_port->is_uartdm)
@@ -680,17 +684,6 @@ static void msm_power(struct uart_port *port, unsigned int state,
 }
 
 #ifdef CONFIG_CONSOLE_POLL
-static int msm_poll_init(struct uart_port *port)
-{
-	struct msm_port *msm_port = UART_TO_MSM(port);
-
-	/* Enable single character mode on RX FIFO */
-	if (msm_port->is_uartdm >= UARTDM_1P4)
-		msm_write(port, UARTDM_DMEN_RX_SC_ENABLE, UARTDM_DMEN);
-
-	return 0;
-}
-
 static int msm_poll_get_char_single(struct uart_port *port)
 {
 	struct msm_port *msm_port = UART_TO_MSM(port);
@@ -702,7 +695,7 @@ static int msm_poll_get_char_single(struct uart_port *port)
 		return msm_read(port, rf_reg) & 0xff;
 }
 
-static int msm_poll_get_char_dm_1p3(struct uart_port *port)
+static int msm_poll_get_char_dm(struct uart_port *port)
 {
 	int c;
 	static u32 slop;
@@ -726,6 +719,10 @@ static int msm_poll_get_char_dm_1p3(struct uart_port *port)
 			slop = msm_read(port, UARTDM_RF);
 			c = sp[0];
 			count--;
+			msm_write(port, UART_CR_CMD_RESET_STALE_INT, UART_CR);
+			msm_write(port, 0xFFFFFF, UARTDM_DMRX);
+			msm_write(port, UART_CR_CMD_STALE_EVENT_ENABLE,
+				  UART_CR);
 		} else {
 			c = NO_POLL_CHAR;
 		}
@@ -749,8 +746,8 @@ static int msm_poll_get_char(struct uart_port *port)
 	imr = msm_read(port, UART_IMR);
 	msm_write(port, 0, UART_IMR);
 
-	if (msm_port->is_uartdm == UARTDM_1P3)
-		c = msm_poll_get_char_dm_1p3(port);
+	if (msm_port->is_uartdm)
+		c = msm_poll_get_char_dm(port);
 	else
 		c = msm_poll_get_char_single(port);
 
@@ -809,7 +806,6 @@ static struct uart_ops msm_uart_pops = {
 	.verify_port = msm_verify_port,
 	.pm = msm_power,
 #ifdef CONFIG_CONSOLE_POLL
-	.poll_init = msm_poll_init,
 	.poll_get_char	= msm_poll_get_char,
 	.poll_put_char	= msm_poll_put_char,
 #endif
@@ -861,6 +857,7 @@ static void msm_console_write(struct console *co, const char *s,
 	struct msm_port *msm_port;
 	int num_newlines = 0;
 	bool replaced = false;
+	int locked = 1;
 
 	BUG_ON(co->index < 0 || co->index >= UART_NR);
 
@@ -873,7 +870,13 @@ static void msm_console_write(struct console *co, const char *s,
 			num_newlines++;
 	count += num_newlines;
 
-	spin_lock(&port->lock);
+	if (port->sysrq)
+		locked = 0;
+	else if (oops_in_progress)
+		locked = spin_trylock(&port->lock);
+	else
+		spin_lock(&port->lock);
+
 	if (msm_port->is_uartdm)
 		reset_dm_count(port, count);
 
@@ -910,7 +913,9 @@ static void msm_console_write(struct console *co, const char *s,
 		msm_write(port, *bf, msm_port->is_uartdm ? UARTDM_TF : UART_TF);
 		i += num_chars;
 	}
-	spin_unlock(&port->lock);
+
+	if (locked)
+		spin_unlock(&port->lock);
 }
 
 static int __init msm_console_setup(struct console *co, char *options)
@@ -1062,6 +1067,7 @@ static struct of_device_id msm_match_table[] = {
 	{ .compatible = "qcom,msm-uartdm" },
 	{}
 };
+MODULE_DEVICE_TABLE(of, msm_match_table);
 
 static struct platform_driver msm_platform_driver = {
 	.remove = msm_serial_remove,

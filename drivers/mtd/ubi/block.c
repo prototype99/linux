@@ -255,6 +255,7 @@ static int do_ubiblock_request(struct ubiblock *dev, struct request *req)
 	mutex_lock(&dev->dev_mutex);
 	ret = ubiblock_read(dev, bio_data(req->bio), sec, len);
 	mutex_unlock(&dev->dev_mutex);
+	rq_flush_dcache_pages(req);
 
 	return ret;
 }
@@ -321,7 +322,7 @@ static int ubiblock_open(struct block_device *bdev, fmode_t mode)
 	 * in any case.
 	 */
 	if (mode & FMODE_WRITE) {
-		ret = -EPERM;
+		ret = -EROFS;
 		goto out_unlock;
 	}
 

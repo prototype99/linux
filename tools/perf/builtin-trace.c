@@ -1276,11 +1276,11 @@ static const char *thread__fd_path(struct thread *thread, int fd,
 	if (fd < 0)
 		return NULL;
 
-	if ((fd > ttrace->paths.max || ttrace->paths.table[fd] == NULL))
+	if ((fd > ttrace->paths.max || ttrace->paths.table[fd] == NULL)) {
 		if (!trace->live)
 			return NULL;
 		++trace->stats.proc_getname;
-		if (thread__read_fd_path(thread, fd)) {
+		if (thread__read_fd_path(thread, fd))
 			return NULL;
 	}
 
@@ -1359,6 +1359,7 @@ static int trace__process_event(struct trace *trace, struct machine *machine,
 		color_fprintf(trace->output, PERF_COLOR_RED,
 			      "LOST %" PRIu64 " events!\n", event->lost.lost);
 		ret = machine__process_lost_event(machine, event, sample);
+		break;
 	default:
 		ret = machine__process_event(machine, event, sample);
 		break;
@@ -1646,7 +1647,7 @@ static int trace__sys_enter(struct trace *trace, struct perf_evsel *evsel,
 
 	if (!strcmp(sc->name, "exit_group") || !strcmp(sc->name, "exit")) {
 		if (!trace->duration_filter && !trace->summary_only) {
-			trace__fprintf_entry_head(trace, thread, 1, sample->time, trace->output);
+			trace__fprintf_entry_head(trace, thread, 1, ttrace->entry_time, trace->output);
 			fprintf(trace->output, "%-70s\n", ttrace->entry_str);
 		}
 	} else
@@ -1701,7 +1702,7 @@ static int trace__sys_exit(struct trace *trace, struct perf_evsel *evsel,
 	if (trace->summary_only)
 		goto out;
 
-	trace__fprintf_entry_head(trace, thread, duration, sample->time, trace->output);
+	trace__fprintf_entry_head(trace, thread, duration, ttrace->entry_time, trace->output);
 
 	if (ttrace->entry_pending) {
 		fprintf(trace->output, "%-70s", ttrace->entry_str);

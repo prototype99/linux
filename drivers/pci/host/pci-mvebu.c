@@ -873,7 +873,7 @@ static int mvebu_get_tgt_attr(struct device_node *np, int devfn,
 	rangesz = pna + na + ns;
 	nranges = rlen / sizeof(__be32) / rangesz;
 
-	for (i = 0; i < nranges; i++) {
+	for (i = 0; i < nranges; i++, range += rangesz) {
 		u32 flags = of_read_number(range, 1);
 		u32 slot = of_read_number(range + 1, 1);
 		u64 cpuaddr = of_read_number(range + na, pna);
@@ -883,14 +883,14 @@ static int mvebu_get_tgt_attr(struct device_node *np, int devfn,
 			rtype = IORESOURCE_IO;
 		else if (DT_FLAGS_TO_TYPE(flags) == DT_TYPE_MEM32)
 			rtype = IORESOURCE_MEM;
+		else
+			continue;
 
 		if (slot == PCI_SLOT(devfn) && type == rtype) {
 			*tgt = DT_CPUADDR_TO_TARGET(cpuaddr);
 			*attr = DT_CPUADDR_TO_ATTR(cpuaddr);
 			return 0;
 		}
-
-		range += rangesz;
 	}
 
 	return -ENOENT;
@@ -940,7 +940,7 @@ static int mvebu_pcie_probe(struct platform_device *pdev)
 		pcie->realio.start = PCIBIOS_MIN_IO;
 		pcie->realio.end = min_t(resource_size_t,
 					 IO_SPACE_LIMIT,
-					 resource_size(&pcie->io));
+					 resource_size(&pcie->io) - 1);
 	} else
 		pcie->realio = pcie->io;
 

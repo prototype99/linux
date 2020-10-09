@@ -250,12 +250,22 @@ static void pop_frame(struct del_stack *s)
 	dm_tm_unlock(s->tm, f->b);
 }
 
+static void unlock_all_frames(struct del_stack *s)
+{
+	struct frame *f;
+
+	while (unprocessed_frames(s)) {
+		f = s->spine + s->top--;
+		dm_tm_unlock(s->tm, f->b);
+	}
+}
+
 int dm_btree_del(struct dm_btree_info *info, dm_block_t root)
 {
 	int r;
 	struct del_stack *s;
 
-	s = kmalloc(sizeof(*s), GFP_KERNEL);
+	s = kmalloc(sizeof(*s), GFP_NOIO);
 	if (!s)
 		return -ENOMEM;
 	s->info = info;
@@ -306,9 +316,13 @@ int dm_btree_del(struct dm_btree_info *info, dm_block_t root)
 			pop_frame(s);
 		}
 	}
-
 out:
+	if (r) {
+		/* cleanup all frames of del_stack */
+		unlock_all_frames(s);
+	}
 	kfree(s);
+
 	return r;
 }
 EXPORT_SYMBOL_GPL(dm_btree_del);
@@ -471,8 +485,10 @@ static int btree_split_sibling(struct shadow_spine *s, dm_block_t root,
 
 	r = insert_at(sizeof(__le64), pn, parent_index + 1,
 		      le64_to_cpu(rn->keys[0]), &location);
-	if (r)
+	if (r) {
+		unlock_block(s->info, right);
 		return r;
+	}
 
 	if (key < le64_to_cpu(rn->keys[0])) {
 		unlock_block(s->info, right);
@@ -517,39 +533,40 @@ static int btree_split_beneath(struct shadow_spine *s, uint64_t key)
 
 	new_parent = shadow_current(s);
 
+	pn = dm_block_data(new_parent);
+	size = le32_to_cpu(pn->header.flags) & INTERNAL_NODE ?
+		sizeof(__le64) : s->info->value_type.size;
+
+	/* create & init the left block */
 	r = new_block(s->info, &left);
 	if (r < 0)
 		return r;
 
-	r = new_block(s->info, &right);
-	if (r < 0) {
-		/* FIXME: put left */
-		return r;
-	}
-
-	pn = dm_block_data(new_parent);
 	ln = dm_block_data(left);
-	rn = dm_block_data(right);
-
 	nr_left = le32_to_cpu(pn->header.nr_entries) / 2;
-	nr_right = le32_to_cpu(pn->header.nr_entries) - nr_left;
 
 	ln->header.flags = pn->header.flags;
 	ln->header.nr_entries = cpu_to_le32(nr_left);
 	ln->header.max_entries = pn->header.max_entries;
 	ln->header.value_size = pn->header.value_size;
+	memcpy(ln->keys, pn->keys, nr_left * sizeof(pn->keys[0]));
+	memcpy(value_ptr(ln, 0), value_ptr(pn, 0), nr_left * size);
+
+	/* create & init the right block */
+	r = new_block(s->info, &right);
+	if (r < 0) {
+		unlock_block(s->info, left);
+		return r;
+	}
+
+	rn = dm_block_data(right);
+	nr_right = le32_to_cpu(pn->header.nr_entries) - nr_left;
 
 	rn->header.flags = pn->header.flags;
 	rn->header.nr_entries = cpu_to_le32(nr_right);
 	rn->header.max_entries = pn->header.max_entries;
 	rn->header.value_size = pn->header.value_size;
-
-	memcpy(ln->keys, pn->keys, nr_left * sizeof(pn->keys[0]));
 	memcpy(rn->keys, pn->keys + nr_left, nr_right * sizeof(pn->keys[0]));
-
-	size = le32_to_cpu(pn->header.flags) & INTERNAL_NODE ?
-		sizeof(__le64) : s->info->value_type.size;
-	memcpy(value_ptr(ln, 0), value_ptr(pn, 0), nr_left * size);
 	memcpy(value_ptr(rn, 0), value_ptr(pn, nr_left),
 	       nr_right * size);
 
@@ -572,23 +589,8 @@ static int btree_split_beneath(struct shadow_spine *s, uint64_t key)
 	pn->keys[1] = rn->keys[0];
 	memcpy_disk(value_ptr(pn, 1), &val, sizeof(__le64));
 
-	/*
-	 * rejig the spine.  This is ugly, since it knows too
-	 * much about the spine
-	 */
-	if (s->nodes[0] != new_parent) {
-		unlock_block(s->info, s->nodes[0]);
-		s->nodes[0] = new_parent;
-	}
-	if (key < le64_to_cpu(rn->keys[0])) {
-		unlock_block(s->info, right);
-		s->nodes[1] = left;
-	} else {
-		unlock_block(s->info, left);
-		s->nodes[1] = right;
-	}
-	s->count = 2;
-
+	unlock_block(s->info, left);
+	unlock_block(s->info, right);
 	return 0;
 }
 
@@ -667,12 +669,7 @@ static int insert(struct dm_btree_info *info, dm_block_t root,
 	struct btree_node *n;
 	struct dm_btree_value_type le64_type;
 
-	le64_type.context = NULL;
-	le64_type.size = sizeof(__le64);
-	le64_type.inc = NULL;
-	le64_type.dec = NULL;
-	le64_type.equal = NULL;
-
+	init_le64_type(info->tm, &le64_type);
 	init_shadow_spine(&spine, info);
 
 	for (level = 0; level < (info->levels - 1); level++) {
@@ -793,8 +790,12 @@ static int find_key(struct ro_spine *s, dm_block_t block, bool find_highest,
 		else
 			*result_key = le64_to_cpu(ro_node(s)->keys[0]);
 
-		if (next_block || flags & INTERNAL_NODE)
-			block = value64(ro_node(s), i);
+		if (next_block || flags & INTERNAL_NODE) {
+			if (find_highest)
+				block = value64(ro_node(s), i);
+			else
+				block = value64(ro_node(s), 0);
+		}
 
 	} while (flags & INTERNAL_NODE);
 
@@ -847,22 +848,26 @@ EXPORT_SYMBOL_GPL(dm_btree_find_lowest_key);
  * FIXME: We shouldn't use a recursive algorithm when we have limited stack
  * space.  Also this only works for single level trees.
  */
-static int walk_node(struct ro_spine *s, dm_block_t block,
+static int walk_node(struct dm_btree_info *info, dm_block_t block,
 		     int (*fn)(void *context, uint64_t *keys, void *leaf),
 		     void *context)
 {
 	int r;
 	unsigned i, nr;
+	struct dm_block *node;
 	struct btree_node *n;
 	uint64_t keys;
 
-	r = ro_step(s, block);
-	n = ro_node(s);
+	r = bn_read_lock(info, block, &node);
+	if (r)
+		return r;
+
+	n = dm_block_data(node);
 
 	nr = le32_to_cpu(n->header.nr_entries);
 	for (i = 0; i < nr; i++) {
 		if (le32_to_cpu(n->header.flags) & INTERNAL_NODE) {
-			r = walk_node(s, value64(n, i), fn, context);
+			r = walk_node(info, value64(n, i), fn, context);
 			if (r)
 				goto out;
 		} else {
@@ -874,7 +879,7 @@ static int walk_node(struct ro_spine *s, dm_block_t block,
 	}
 
 out:
-	ro_pop(s);
+	dm_tm_unlock(info->tm, node);
 	return r;
 }
 
@@ -882,15 +887,7 @@ int dm_btree_walk(struct dm_btree_info *info, dm_block_t root,
 		  int (*fn)(void *context, uint64_t *keys, void *leaf),
 		  void *context)
 {
-	int r;
-	struct ro_spine spine;
-
 	BUG_ON(info->levels > 1);
-
-	init_ro_spine(&spine, info);
-	r = walk_node(&spine, root, fn, context);
-	exit_ro_spine(&spine);
-
-	return r;
+	return walk_node(info, root, fn, context);
 }
 EXPORT_SYMBOL_GPL(dm_btree_walk);

@@ -76,6 +76,7 @@ static int
 nouveau_vram_manager_new(struct ttm_mem_type_manager *man,
 			 struct ttm_buffer_object *bo,
 			 struct ttm_placement *placement,
+			 uint32_t flags,
 			 struct ttm_mem_reg *mem)
 {
 	struct nouveau_drm *drm = nouveau_bdev(man->bdev);
@@ -162,6 +163,7 @@ static int
 nouveau_gart_manager_new(struct ttm_mem_type_manager *man,
 			 struct ttm_buffer_object *bo,
 			 struct ttm_placement *placement,
+			 uint32_t flags,
 			 struct ttm_mem_reg *mem)
 {
 	struct nouveau_drm *drm = nouveau_bdev(bo->bdev);
@@ -242,6 +244,7 @@ static int
 nv04_gart_manager_new(struct ttm_mem_type_manager *man,
 		      struct ttm_buffer_object *bo,
 		      struct ttm_placement *placement,
+		      uint32_t flags,
 		      struct ttm_mem_reg *mem)
 {
 	struct nouveau_mem *node;
@@ -394,6 +397,9 @@ nouveau_ttm_init(struct nouveau_drm *drm)
 	drm->gem.vram_available  = nouveau_fb(drm->device)->ram->size;
 	drm->gem.vram_available -= nouveau_instmem(drm->device)->reserved;
 
+	arch_io_reserve_memtype_wc(nv_device_resource_start(device, 1),
+				   nv_device_resource_len(device, 1));
+
 	ret = ttm_bo_init_mm(&drm->ttm.bdev, TTM_PL_VRAM,
 			      drm->gem.vram_available >> PAGE_SHIFT);
 	if (ret) {
@@ -426,6 +432,8 @@ nouveau_ttm_init(struct nouveau_drm *drm)
 void
 nouveau_ttm_fini(struct nouveau_drm *drm)
 {
+	struct nouveau_device *device = nv_device(drm->device);
+
 	mutex_lock(&drm->dev->struct_mutex);
 	ttm_bo_clean_mm(&drm->ttm.bdev, TTM_PL_VRAM);
 	ttm_bo_clean_mm(&drm->ttm.bdev, TTM_PL_TT);
@@ -437,4 +445,7 @@ nouveau_ttm_fini(struct nouveau_drm *drm)
 
 	arch_phys_wc_del(drm->ttm.mtrr);
 	drm->ttm.mtrr = 0;
+	arch_io_free_memtype_wc(nv_device_resource_start(device, 1),
+				nv_device_resource_len(device, 1));
+
 }

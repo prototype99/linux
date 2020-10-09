@@ -61,6 +61,11 @@ module_param(mem_size, ulong, 0400);
 MODULE_PARM_DESC(mem_size,
 		"size of reserved RAM used to store oops/panic logs");
 
+static unsigned int mem_type;
+module_param(mem_type, uint, 0600);
+MODULE_PARM_DESC(mem_type,
+		"set to 1 to try to use unbuffered memory (default 0)");
+
 static int dump_oops = 1;
 module_param(dump_oops, int, 0600);
 MODULE_PARM_DESC(dump_oops,
@@ -79,6 +84,7 @@ struct ramoops_context {
 	struct persistent_ram_zone *fprz;
 	phys_addr_t phys_addr;
 	unsigned long size;
+	unsigned int memtype;
 	size_t record_size;
 	size_t console_size;
 	size_t ftrace_size;
@@ -267,6 +273,17 @@ static int notrace ramoops_pstore_write_buf(enum pstore_type_id type,
 
 	prz = cxt->przs[cxt->dump_write_cnt];
 
+	/*
+	 * Since this is a new crash dump, we need to reset the buffer in
+	 * case it still has an old dump present. Without this, the new dump
+	 * will get appended, which would seriously confuse anything trying
+	 * to check dump file contents. Specifically, ramoops_read_kmsg_hdr()
+	 * expects to find a dump header in the beginning of buffer data, so
+	 * we must to reset the buffer values, in order to ensure that the
+	 * header will be written to the beginning of the buffer.
+	 */
+	persistent_ram_zap(prz);
+
 	hlen = ramoops_write_kmsg_hdr(prz, compressed);
 	if (size + hlen > prz->buffer_size)
 		size = prz->buffer_size - hlen;
@@ -358,7 +375,8 @@ static int ramoops_init_przs(struct device *dev, struct ramoops_context *cxt,
 		size_t sz = cxt->record_size;
 
 		cxt->przs[i] = persistent_ram_new(*paddr, sz, 0,
-						  &cxt->ecc_info);
+						  &cxt->ecc_info,
+						  cxt->memtype);
 		if (IS_ERR(cxt->przs[i])) {
 			err = PTR_ERR(cxt->przs[i]);
 			dev_err(dev, "failed to request mem region (0x%zx@0x%llx): %d\n",
@@ -388,7 +406,7 @@ static int ramoops_init_prz(struct device *dev, struct ramoops_context *cxt,
 		return -ENOMEM;
 	}
 
-	*prz = persistent_ram_new(*paddr, sz, sig, &cxt->ecc_info);
+	*prz = persistent_ram_new(*paddr, sz, sig, &cxt->ecc_info, cxt->memtype);
 	if (IS_ERR(*prz)) {
 		int err = PTR_ERR(*prz);
 
@@ -435,6 +453,7 @@ static int ramoops_probe(struct platform_device *pdev)
 
 	cxt->size = pdata->mem_size;
 	cxt->phys_addr = pdata->mem_address;
+	cxt->memtype = pdata->mem_type;
 	cxt->record_size = pdata->record_size;
 	cxt->console_size = pdata->console_size;
 	cxt->ftrace_size = pdata->ftrace_size;
@@ -549,8 +568,22 @@ static struct platform_driver ramoops_driver = {
 	},
 };
 
-static void ramoops_register_dummy(void)
+static inline void ramoops_unregister_dummy(void)
 {
+	platform_device_unregister(dummy);
+	dummy = NULL;
+
+	kfree(dummy_data);
+	dummy_data = NULL;
+}
+
+static void __init ramoops_register_dummy(void)
+{
+	/*
+	 * Prepare a dummy platform data structure to carry the module
+	 * parameters. If mem_size isn't set, then there are no module
+	 * parameters, and we can skip this.
+	 */
 	if (!mem_size)
 		return;
 
@@ -564,6 +597,7 @@ static void ramoops_register_dummy(void)
 
 	dummy_data->mem_size = mem_size;
 	dummy_data->mem_address = mem_address;
+	dummy_data->mem_type = 0;
 	dummy_data->record_size = record_size;
 	dummy_data->console_size = ramoops_console_size;
 	dummy_data->ftrace_size = ramoops_ftrace_size;
@@ -579,21 +613,28 @@ static void ramoops_register_dummy(void)
 	if (IS_ERR(dummy)) {
 		pr_info("could not create platform device: %ld\n",
 			PTR_ERR(dummy));
+		dummy = NULL;
+		ramoops_unregister_dummy();
 	}
 }
 
 static int __init ramoops_init(void)
 {
+	int ret;
+
 	ramoops_register_dummy();
-	return platform_driver_register(&ramoops_driver);
+	ret = platform_driver_register(&ramoops_driver);
+	if (ret != 0)
+		ramoops_unregister_dummy();
+
+	return ret;
 }
 postcore_initcall(ramoops_init);
 
 static void __exit ramoops_exit(void)
 {
 	platform_driver_unregister(&ramoops_driver);
-	platform_device_unregister(dummy);
-	kfree(dummy_data);
+	ramoops_unregister_dummy();
 }
 module_exit(ramoops_exit);
 

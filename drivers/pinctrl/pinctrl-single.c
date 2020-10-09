@@ -562,9 +562,25 @@ static int pcs_request_gpio(struct pinctrl_dev *pctldev,
 			|| pin < frange->offset)
 			continue;
 		mux_bytes = pcs->width / BITS_PER_BYTE;
-		data = pcs->read(pcs->base + pin * mux_bytes) & ~pcs->fmask;
-		data |= frange->gpiofunc;
-		pcs->write(data, pcs->base + pin * mux_bytes);
+
+		if (pcs->bits_per_mux) {
+			int byte_num, offset, pin_shift;
+
+			byte_num = (pcs->bits_per_pin * pin) / BITS_PER_BYTE;
+			offset = (byte_num / mux_bytes) * mux_bytes;
+			pin_shift = pin % (pcs->width / pcs->bits_per_pin) *
+				    pcs->bits_per_pin;
+
+			data = pcs->read(pcs->base + offset);
+			data &= ~(pcs->fmask << pin_shift);
+			data |= frange->gpiofunc << pin_shift;
+			pcs->write(data, pcs->base + offset);
+		} else {
+			data = pcs->read(pcs->base + pin * mux_bytes);
+			data &= ~pcs->fmask;
+			data |= frange->gpiofunc;
+			pcs->write(data, pcs->base + pin * mux_bytes);
+		}
 		break;
 	}
 	return 0;
@@ -1329,9 +1345,9 @@ static int pcs_parse_bits_in_pinctrl_entry(struct pcs_device *pcs,
 
 		/* Parse pins in each row from LSB */
 		while (mask) {
-			bit_pos = ffs(mask);
+			bit_pos = __ffs(mask);
 			pin_num_from_lsb = bit_pos / pcs->bits_per_pin;
-			mask_pos = ((pcs->fmask) << (bit_pos - 1));
+			mask_pos = ((pcs->fmask) << bit_pos);
 			val_pos = val & mask_pos;
 			submask = mask & mask_pos;
 
@@ -1632,6 +1648,9 @@ static inline void pcs_irq_set(struct pcs_soc_data *pcs_soc,
 		else
 			mask &= ~soc_mask;
 		pcs->write(mask, pcswi->reg);
+
+		/* flush posted write */
+		mask = pcs->read(pcswi->reg);
 		raw_spin_unlock(&pcs->lock);
 	}
 
@@ -1908,7 +1927,7 @@ static int pcs_probe(struct platform_device *pdev)
 	ret = of_property_read_u32(np, "pinctrl-single,function-mask",
 				   &pcs->fmask);
 	if (!ret) {
-		pcs->fshift = ffs(pcs->fmask) - 1;
+		pcs->fshift = __ffs(pcs->fmask);
 		pcs->fmax = pcs->fmask >> pcs->fshift;
 	} else {
 		/* If mask property doesn't exist, function mux is invalid. */

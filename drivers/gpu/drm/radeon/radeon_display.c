@@ -942,12 +942,12 @@ static void avivo_get_fb_ref_div(unsigned nom, unsigned den, unsigned post_div,
 	ref_div_max = max(min(100 / post_div, ref_div_max), 1u);
 
 	/* get matching reference and feedback divider */
-	*ref_div = min(max(DIV_ROUND_CLOSEST(den, post_div), 1u), ref_div_max);
+	*ref_div = min(max(den/post_div, 1u), ref_div_max);
 	*fb_div = DIV_ROUND_CLOSEST(nom * *ref_div * post_div, den);
 
 	/* limit fb divider to its maximum */
         if (*fb_div > fb_div_max) {
-		*ref_div = DIV_ROUND_CLOSEST(*ref_div * fb_div_max, *fb_div);
+		*ref_div = (*ref_div * fb_div_max)/(*fb_div);
 		*fb_div = fb_div_max;
 	}
 }
@@ -1000,6 +1000,9 @@ void radeon_compute_pll_avivo(struct radeon_pll *pll,
 	if (pll->flags & RADEON_PLL_USE_FRAC_FB_DIV &&
 	    pll->flags & RADEON_PLL_USE_REF_DIV)
 		ref_div_max = pll->reference_div;
+	else if (pll->flags & RADEON_PLL_PREFER_MINM_OVER_MAXP)
+		/* fix for problems on RS880 */
+		ref_div_max = min(pll->max_ref_div, 7u);
 	else
 		ref_div_max = pll->max_ref_div;
 
@@ -1657,18 +1660,8 @@ int radeon_modeset_init(struct radeon_device *rdev)
 	radeon_fbdev_init(rdev);
 	drm_kms_helper_poll_init(rdev->ddev);
 
-	if (rdev->pm.dpm_enabled) {
-		/* do dpm late init */
-		ret = radeon_pm_late_init(rdev);
-		if (ret) {
-			rdev->pm.dpm_enabled = false;
-			DRM_ERROR("radeon_pm_late_init failed, disabling dpm\n");
-		}
-		/* set the dpm state for PX since there won't be
-		 * a modeset to call this.
-		 */
-		radeon_pm_compute_clocks(rdev);
-	}
+	/* do pm late init */
+	ret = radeon_pm_late_init(rdev);
 
 	return 0;
 }

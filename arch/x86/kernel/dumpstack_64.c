@@ -24,7 +24,6 @@ static char x86_stack_ids[][8] = {
 		[ DEBUG_STACK-1			]	= "#DB",
 		[ NMI_STACK-1			]	= "NMI",
 		[ DOUBLEFAULT_STACK-1		]	= "#DF",
-		[ STACKFAULT_STACK-1		]	= "#SS",
 		[ MCE_STACK-1			]	= "#MC",
 #if DEBUG_STKSZ > EXCEPTION_STKSZ
 		[ N_EXCEPTION_STACKS ...
@@ -302,7 +301,7 @@ void show_regs(struct pt_regs *regs)
 
 	sp = regs->sp;
 	show_regs_print_info(KERN_DEFAULT);
-	__show_regs(regs, 1);
+	__show_regs(regs, user_mode(regs) ? SHOW_REGS_USER : SHOW_REGS_ALL);
 
 	/*
 	 * When in-kernel, we also print out the stack and code at the

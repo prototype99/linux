@@ -203,11 +203,6 @@ enum MWIFIEX_802_11_PRIVACY_FILTER {
 
 #define MWIFIEX_DEF_AMPDU	IEEE80211_HT_AMPDU_PARM_FACTOR
 
-#define GET_RXSTBC(x) (x & IEEE80211_HT_CAP_RX_STBC)
-#define MWIFIEX_RX_STBC1	0x0100
-#define MWIFIEX_RX_STBC12	0x0200
-#define MWIFIEX_RX_STBC123	0x0300
-
 /* dev_cap bitmap
  * BIT
  * 0-16		reserved
@@ -1403,9 +1398,10 @@ struct mwifiex_ie_types_wmm_queue_status {
 struct ieee_types_vendor_header {
 	u8 element_id;
 	u8 len;
-	u8 oui[4];	/* 0~2: oui, 3: oui_type */
-	u8 oui_subtype;
-	u8 version;
+	struct {
+		u8 oui[3];
+		u8 oui_type;
+	} __packed oui;
 } __packed;
 
 struct ieee_types_wmm_parameter {
@@ -1419,6 +1415,9 @@ struct ieee_types_wmm_parameter {
 	 *   Version     [1]
 	 */
 	struct ieee_types_vendor_header vend_hdr;
+	u8 oui_subtype;
+	u8 version;
+
 	u8 qos_info_bitmap;
 	u8 reserved;
 	struct ieee_types_wmm_ac_parameters ac_params[IEEE80211_NUM_ACS];
@@ -1436,6 +1435,8 @@ struct ieee_types_wmm_info {
 	 *   Version     [1]
 	 */
 	struct ieee_types_vendor_header vend_hdr;
+	u8 oui_subtype;
+	u8 version;
 
 	u8 qos_info_bitmap;
 } __packed;

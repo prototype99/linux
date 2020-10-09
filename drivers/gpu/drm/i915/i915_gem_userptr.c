@@ -411,19 +411,24 @@ __i915_gem_userptr_get_pages_worker(struct work_struct *_work)
 	if (pvec != NULL) {
 		struct mm_struct *mm = obj->userptr.mm;
 
-		down_read(&mm->mmap_sem);
-		while (pinned < num_pages) {
-			ret = get_user_pages(work->task, mm,
-					     obj->userptr.ptr + pinned * PAGE_SIZE,
-					     num_pages - pinned,
-					     !obj->userptr.read_only, 0,
-					     pvec + pinned, NULL);
-			if (ret < 0)
-				break;
+		ret = -EFAULT;
+		if (atomic_inc_not_zero(&mm->mm_users)) {
+			down_read(&mm->mmap_sem);
+			while (pinned < num_pages) {
+				ret = get_user_pages
+					(work->task, mm,
+					 obj->userptr.ptr + pinned * PAGE_SIZE,
+					 num_pages - pinned,
+					 !obj->userptr.read_only, 0,
+					 pvec + pinned, NULL);
+				if (ret < 0)
+					break;
 
-			pinned += ret;
+				pinned += ret;
+			}
+			up_read(&mm->mmap_sem);
+			mmput(mm);
 		}
-		up_read(&mm->mmap_sem);
 	}
 
 	mutex_lock(&dev->struct_mutex);
@@ -554,19 +559,38 @@ i915_gem_userptr_get_pages(struct drm_i915_gem_object *obj)
 static void
 i915_gem_userptr_put_pages(struct drm_i915_gem_object *obj)
 {
-	struct scatterlist *sg;
-	int i;
+	struct sg_page_iter sg_iter;
 
 	BUG_ON(obj->userptr.work != NULL);
 
 	if (obj->madv != I915_MADV_WILLNEED)
 		obj->dirty = 0;
 
-	for_each_sg(obj->pages->sgl, sg, obj->pages->nents, i) {
-		struct page *page = sg_page(sg);
+	for_each_sg_page(obj->pages->sgl, &sg_iter, obj->pages->nents, 0) {
+		struct page *page = sg_page_iter_page(&sg_iter);
 
-		if (obj->dirty)
+		if (obj->dirty && trylock_page(page)) {
+			/*
+			 * As this may not be anonymous memory (e.g. shmem)
+			 * but exist on a real mapping, we have to lock
+			 * the page in order to dirty it -- holding
+			 * the page reference is not sufficient to
+			 * prevent the inode from being truncated.
+			 * Play safe and take the lock.
+			 *
+			 * However...!
+			 *
+			 * The mmu-notifier can be invalidated for a
+			 * migrate_page, that is alreadying holding the lock
+			 * on the page. Such a try_to_unmap() will result
+			 * in us calling put_pages() and so recursively try
+			 * to lock the page. We avoid that deadlock with
+			 * a trylock_page() and in exchange we risk missing
+			 * some page dirtying.
+			 */
 			set_page_dirty(page);
+			unlock_page(page);
+		}
 
 		mark_page_accessed(page);
 		page_cache_release(page);
@@ -631,7 +655,10 @@ static const struct drm_i915_gem_object_ops i915_gem_userptr_ops = {
  * Also note, that the object created here is not currently a "first class"
  * object, in that several ioctls are banned. These are the CPU access
  * ioctls: mmap(), pwrite and pread. In practice, you are expected to use
- * direct access via your pointer rather than use those ioctls.
+ * direct access via your pointer rather than use those ioctls. Another
+ * restriction is that we do not allow userptr surfaces to be pinned to the
+ * hardware and so we reject any attempt to create a framebuffer out of a
+ * userptr.
  *
  * If you think this is a good interface to use to pass GPU memory between
  * drivers, please use dma-buf instead. In fact, wherever possible use
@@ -648,6 +675,9 @@ i915_gem_userptr_ioctl(struct drm_device *dev, void *data, struct drm_file *file
 
 	if (args->flags & ~(I915_USERPTR_READ_ONLY |
 			    I915_USERPTR_UNSYNCHRONIZED))
+		return -EINVAL;
+
+	if (!args->user_size)
 		return -EINVAL;
 
 	if (offset_in_page(args->user_ptr | args->user_size))

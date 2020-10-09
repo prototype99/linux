@@ -97,20 +97,20 @@ static void __init of_selftest_dynamic(void)
 	/* Add a new property - should pass*/
 	prop->name = "new-property";
 	prop->value = "new-property-data";
-	prop->length = strlen(prop->value);
+	prop->length = strlen(prop->value) + 1;
 	selftest(of_add_property(np, prop) == 0, "Adding a new property failed\n");
 
 	/* Try to add an existing property - should fail */
 	prop++;
 	prop->name = "new-property";
 	prop->value = "new-property-data-should-fail";
-	prop->length = strlen(prop->value);
+	prop->length = strlen(prop->value) + 1;
 	selftest(of_add_property(np, prop) != 0,
 		 "Adding an existing property should have failed\n");
 
 	/* Try to modify an existing property - should pass */
 	prop->value = "modify-property-data-should-pass";
-	prop->length = strlen(prop->value);
+	prop->length = strlen(prop->value) + 1;
 	selftest(of_update_property(np, prop) == 0,
 		 "Updating an existing property should have passed\n");
 
@@ -118,7 +118,7 @@ static void __init of_selftest_dynamic(void)
 	prop++;
 	prop->name = "modify-property";
 	prop->value = "modify-missing-property-data-should-pass";
-	prop->length = strlen(prop->value);
+	prop->length = strlen(prop->value) + 1;
 	selftest(of_update_property(np, prop) == 0,
 		 "Updating a missing property should have passed\n");
 
@@ -239,8 +239,9 @@ static void __init of_selftest_parse_phandle_with_args(void)
 	selftest(rc == -EINVAL, "expected:%i got:%i\n", -EINVAL, rc);
 }
 
-static void __init of_selftest_property_match_string(void)
+static void __init of_selftest_property_string(void)
 {
+	const char *strings[4];
 	struct device_node *np;
 	int rc;
 
@@ -257,13 +258,66 @@ static void __init of_selftest_property_match_string(void)
 	rc = of_property_match_string(np, "phandle-list-names", "third");
 	selftest(rc == 2, "third expected:0 got:%i\n", rc);
 	rc = of_property_match_string(np, "phandle-list-names", "fourth");
-	selftest(rc == -ENODATA, "unmatched string; rc=%i", rc);
+	selftest(rc == -ENODATA, "unmatched string; rc=%i\n", rc);
 	rc = of_property_match_string(np, "missing-property", "blah");
-	selftest(rc == -EINVAL, "missing property; rc=%i", rc);
+	selftest(rc == -EINVAL, "missing property; rc=%i\n", rc);
 	rc = of_property_match_string(np, "empty-property", "blah");
-	selftest(rc == -ENODATA, "empty property; rc=%i", rc);
+	selftest(rc == -ENODATA, "empty property; rc=%i\n", rc);
 	rc = of_property_match_string(np, "unterminated-string", "blah");
-	selftest(rc == -EILSEQ, "unterminated string; rc=%i", rc);
+	selftest(rc == -EILSEQ, "unterminated string; rc=%i\n", rc);
+
+	/* of_property_count_strings() tests */
+	rc = of_property_count_strings(np, "string-property");
+	selftest(rc == 1, "Incorrect string count; rc=%i\n", rc);
+	rc = of_property_count_strings(np, "phandle-list-names");
+	selftest(rc == 3, "Incorrect string count; rc=%i\n", rc);
+	rc = of_property_count_strings(np, "unterminated-string");
+	selftest(rc == -EILSEQ, "unterminated string; rc=%i\n", rc);
+	rc = of_property_count_strings(np, "unterminated-string-list");
+	selftest(rc == -EILSEQ, "unterminated string array; rc=%i\n", rc);
+
+	/* of_property_read_string_index() tests */
+	rc = of_property_read_string_index(np, "string-property", 0, strings);
+	selftest(rc == 0 && !strcmp(strings[0], "foobar"), "of_property_read_string_index() failure; rc=%i\n", rc);
+	strings[0] = NULL;
+	rc = of_property_read_string_index(np, "string-property", 1, strings);
+	selftest(rc == -ENODATA && strings[0] == NULL, "of_property_read_string_index() failure; rc=%i\n", rc);
+	rc = of_property_read_string_index(np, "phandle-list-names", 0, strings);
+	selftest(rc == 0 && !strcmp(strings[0], "first"), "of_property_read_string_index() failure; rc=%i\n", rc);
+	rc = of_property_read_string_index(np, "phandle-list-names", 1, strings);
+	selftest(rc == 0 && !strcmp(strings[0], "second"), "of_property_read_string_index() failure; rc=%i\n", rc);
+	rc = of_property_read_string_index(np, "phandle-list-names", 2, strings);
+	selftest(rc == 0 && !strcmp(strings[0], "third"), "of_property_read_string_index() failure; rc=%i\n", rc);
+	strings[0] = NULL;
+	rc = of_property_read_string_index(np, "phandle-list-names", 3, strings);
+	selftest(rc == -ENODATA && strings[0] == NULL, "of_property_read_string_index() failure; rc=%i\n", rc);
+	strings[0] = NULL;
+	rc = of_property_read_string_index(np, "unterminated-string", 0, strings);
+	selftest(rc == -EILSEQ && strings[0] == NULL, "of_property_read_string_index() failure; rc=%i\n", rc);
+	rc = of_property_read_string_index(np, "unterminated-string-list", 0, strings);
+	selftest(rc == 0 && !strcmp(strings[0], "first"), "of_property_read_string_index() failure; rc=%i\n", rc);
+	strings[0] = NULL;
+	rc = of_property_read_string_index(np, "unterminated-string-list", 2, strings); /* should fail */
+	selftest(rc == -EILSEQ && strings[0] == NULL, "of_property_read_string_index() failure; rc=%i\n", rc);
+	strings[1] = NULL;
+
+	/* of_property_read_string_array() tests */
+	rc = of_property_read_string_array(np, "string-property", strings, 4);
+	selftest(rc == 1, "Incorrect string count; rc=%i\n", rc);
+	rc = of_property_read_string_array(np, "phandle-list-names", strings, 4);
+	selftest(rc == 3, "Incorrect string count; rc=%i\n", rc);
+	rc = of_property_read_string_array(np, "unterminated-string", strings, 4);
+	selftest(rc == -EILSEQ, "unterminated string; rc=%i\n", rc);
+	/* -- An incorrectly formed string should cause a failure */
+	rc = of_property_read_string_array(np, "unterminated-string-list", strings, 4);
+	selftest(rc == -EILSEQ, "unterminated string array; rc=%i\n", rc);
+	/* -- parsing the correctly formed strings should still work: */
+	strings[2] = NULL;
+	rc = of_property_read_string_array(np, "unterminated-string-list", strings, 2);
+	selftest(rc == 2 && strings[2] == NULL, "of_property_read_string_array() failure; rc=%i\n", rc);
+	strings[1] = NULL;
+	rc = of_property_read_string_array(np, "phandle-list-names", strings, 1);
+	selftest(rc == 1 && strings[1] == NULL, "Overwrote end of string array; rc=%i, str='%s'\n", rc, strings[1]);
 }
 
 static void __init of_selftest_parse_interrupts(void)
@@ -271,6 +325,9 @@ static void __init of_selftest_parse_interrupts(void)
 	struct device_node *np;
 	struct of_phandle_args args;
 	int i, rc;
+
+	if (of_irq_workarounds & OF_IMAP_OLDWORLD_MAC)
+		return;
 
 	np = of_find_node_by_path("/testcase-data/interrupts/interrupts0");
 	if (!np) {
@@ -343,6 +400,9 @@ static void __init of_selftest_parse_interrupts_extended(void)
 	struct device_node *np;
 	struct of_phandle_args args;
 	int i, rc;
+
+	if (of_irq_workarounds & OF_IMAP_OLDWORLD_MAC)
+		return;
 
 	np = of_find_node_by_path("/testcase-data/interrupts/interrupts-extended0");
 	if (!np) {
@@ -491,15 +551,19 @@ static void __init of_selftest_platform_populate(void)
 	pdev = of_find_device_by_node(np);
 	selftest(pdev, "device 1 creation failed\n");
 
-	irq = platform_get_irq(pdev, 0);
-	selftest(irq == -EPROBE_DEFER, "device deferred probe failed - %d\n", irq);
+	if (!(of_irq_workarounds & OF_IMAP_OLDWORLD_MAC)) {
+		irq = platform_get_irq(pdev, 0);
+		selftest(irq == -EPROBE_DEFER,
+			 "device deferred probe failed - %d\n", irq);
 
-	/* Test that a parsing failure does not return -EPROBE_DEFER */
-	np = of_find_node_by_path("/testcase-data/testcase-device2");
-	pdev = of_find_device_by_node(np);
-	selftest(pdev, "device 2 creation failed\n");
-	irq = platform_get_irq(pdev, 0);
-	selftest(irq < 0 && irq != -EPROBE_DEFER, "device parsing error failed - %d\n", irq);
+		/* Test that a parsing failure does not return -EPROBE_DEFER */
+		np = of_find_node_by_path("/testcase-data/testcase-device2");
+		pdev = of_find_device_by_node(np);
+		selftest(pdev, "device 2 creation failed\n");
+		irq = platform_get_irq(pdev, 0);
+		selftest(irq < 0 && irq != -EPROBE_DEFER,
+			 "device parsing error failed - %d\n", irq);
+	}
 
 	np = of_find_node_by_path("/testcase-data/platform-tests");
 	if (!np) {
@@ -532,7 +596,7 @@ static int __init of_selftest(void)
 	of_selftest_find_node_by_name();
 	of_selftest_dynamic();
 	of_selftest_parse_phandle_with_args();
-	of_selftest_property_match_string();
+	of_selftest_property_string();
 	of_selftest_parse_interrupts();
 	of_selftest_parse_interrupts_extended();
 	of_selftest_match_node();

@@ -56,6 +56,11 @@
 #define PFERR_RSVD_MASK (1U << PFERR_RSVD_BIT)
 #define PFERR_FETCH_MASK (1U << PFERR_FETCH_BIT)
 
+static inline u64 rsvd_bits(int s, int e)
+{
+	return ((1ULL << (e - s + 1)) - 1) << s;
+}
+
 int kvm_mmu_get_spte_hierarchy(struct kvm_vcpu *vcpu, u64 addr, u64 sptes[4]);
 void kvm_mmu_set_mmio_spte_mask(u64 mmio_mask);
 
@@ -79,10 +84,9 @@ int handle_mmio_page_fault_common(struct kvm_vcpu *vcpu, u64 addr, bool direct);
 void kvm_init_shadow_mmu(struct kvm_vcpu *vcpu, struct kvm_mmu *context);
 void kvm_init_shadow_ept_mmu(struct kvm_vcpu *vcpu, struct kvm_mmu *context,
 		bool execonly);
-void update_permission_bitmask(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
-		bool ept);
+bool kvm_can_do_async_pf(struct kvm_vcpu *vcpu);
 
-static inline unsigned int kvm_mmu_available_pages(struct kvm *kvm)
+static inline unsigned long kvm_mmu_available_pages(struct kvm *kvm)
 {
 	if (kvm->arch.n_max_mmu_pages > kvm->arch.n_used_mmu_pages)
 		return kvm->arch.n_max_mmu_pages -
@@ -173,6 +177,8 @@ static inline bool permission_fault(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
 	unsigned long smap = (cpl - 3) & (rflags & X86_EFLAGS_AC);
 	int index = (pfec >> 1) +
 		    (smap >> (X86_EFLAGS_AC_BIT - PFERR_RSVD_BIT + 1));
+
+	WARN_ON(pfec & PFERR_RSVD_MASK);
 
 	return (mmu->permissions[index] >> pte_access) & 1;
 }

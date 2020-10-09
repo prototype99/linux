@@ -126,7 +126,16 @@ static void pmao_restore_workaround(bool ebb) { }
 
 static bool regs_use_siar(struct pt_regs *regs)
 {
-	return !!regs->result;
+	/*
+	 * When we take a performance monitor exception the regs are setup
+	 * using perf_read_regs() which overloads some fields, in particular
+	 * regs->result to tell us whether to use SIAR.
+	 *
+	 * However if the regs are from another exception, eg. a syscall, then
+	 * they have not been setup using perf_read_regs() and so regs->result
+	 * is something random.
+	 */
+	return ((TRAP(regs) == 0xf00) && regs->result);
 }
 
 /*
@@ -382,8 +391,12 @@ static __u64 power_pmu_bhrb_to(u64 addr)
 	int ret;
 	__u64 target;
 
-	if (is_kernel_addr(addr))
-		return branch_target((unsigned int *)addr);
+	if (is_kernel_addr(addr)) {
+		if (probe_kernel_read(&instr, (void *)addr, sizeof(instr)))
+			return 0;
+
+		return branch_target(&instr);
+	}
 
 	/* Userspace: need copy instruction here then translate it */
 	pagefault_disable();
@@ -745,6 +758,11 @@ void perf_event_print_debug(void)
 	unsigned long sdar, sier, flags;
 	u32 pmcs[MAX_HWEVENTS];
 	int i;
+
+	if (!ppmu) {
+		pr_info("Performance monitor hardware not registered.\n");
+		return;
+	}
 
 	if (!ppmu->n_counter)
 		return;
@@ -1708,6 +1726,7 @@ static int power_pmu_event_init(struct perf_event *event)
 	int n;
 	int err;
 	struct cpu_hw_events *cpuhw;
+	u64 bhrb_filter;
 
 	if (!ppmu)
 		return -ENOENT;
@@ -1804,11 +1823,14 @@ static int power_pmu_event_init(struct perf_event *event)
 	err = power_check_constraints(cpuhw, events, cflags, n + 1);
 
 	if (has_branch_stack(event)) {
-		cpuhw->bhrb_filter = ppmu->bhrb_filter_map(
+		bhrb_filter = ppmu->bhrb_filter_map(
 					event->attr.branch_sample_type);
 
-		if(cpuhw->bhrb_filter == -1)
+		if (bhrb_filter == -1) {
+			put_cpu_var(cpu_hw_events);
 			return -EOPNOTSUPP;
+		}
+		cpuhw->bhrb_filter = bhrb_filter;
 	}
 
 	put_cpu_var(cpu_hw_events);

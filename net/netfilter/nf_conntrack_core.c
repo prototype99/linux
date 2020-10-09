@@ -23,6 +23,7 @@
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/jhash.h>
+#include <linux/siphash.h>
 #include <linux/err.h>
 #include <linux/percpu.h>
 #include <linux/moduleparam.h>
@@ -52,6 +53,7 @@
 #include <net/netfilter/nf_nat.h>
 #include <net/netfilter/nf_nat_core.h>
 #include <net/netfilter/nf_nat_helper.h>
+#include <net/netns/hash.h>
 
 #define NF_CONNTRACK_VERSION	"0.5.0"
 
@@ -231,6 +233,40 @@ nf_ct_invert_tuple(struct nf_conntrack_tuple *inverse,
 	return l4proto->invert_tuple(inverse, orig);
 }
 EXPORT_SYMBOL_GPL(nf_ct_invert_tuple);
+
+/* Generate a almost-unique pseudo-id for a given conntrack.
+ *
+ * intentionally doesn't re-use any of the seeds used for hash
+ * table location, we assume id gets exposed to userspace.
+ *
+ * Following nf_conn items do not change throughout lifetime
+ * of the nf_conn:
+ *
+ * 1. nf_conn address
+ * 2. nf_conn->master address (normally NULL)
+ * 3. the associated net namespace
+ * 4. the original direction tuple
+ */
+u32 nf_ct_get_id(const struct nf_conn *ct)
+{
+	static __read_mostly siphash_key_t ct_id_seed;
+	unsigned long a, b, c, d;
+
+	net_get_random_once(&ct_id_seed, sizeof(ct_id_seed));
+
+	a = (unsigned long)ct;
+	b = (unsigned long)ct->master;
+	c = (unsigned long)nf_ct_net(ct);
+	d = (unsigned long)siphash(&ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple,
+				   sizeof(ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple),
+				   &ct_id_seed);
+#ifdef CONFIG_64BIT
+	return siphash_4u64((u64)a, (u64)b, (u64)c, (u64)d, &ct_id_seed);
+#else
+	return siphash_4u32((u32)a, (u32)b, (u32)c, (u32)d, &ct_id_seed);
+#endif
+}
+EXPORT_SYMBOL_GPL(nf_ct_get_id);
 
 static void
 clean_from_lists(struct nf_conn *ct)
@@ -726,6 +762,7 @@ nf_conntrack_tuple_taken(const struct nf_conntrack_tuple *tuple,
 	 * least once for the stats anyway.
 	 */
 	rcu_read_lock_bh();
+ begin:
 	hlist_nulls_for_each_entry_rcu(h, n, &net->ct.hash[hash], hnnode) {
 		ct = nf_ct_tuplehash_to_ctrack(h);
 		if (ct != ignored_conntrack &&
@@ -737,6 +774,12 @@ nf_conntrack_tuple_taken(const struct nf_conntrack_tuple *tuple,
 		}
 		NF_CT_STAT_INC(net, searched);
 	}
+
+	if (get_nulls_value(n) != hash) {
+		NF_CT_STAT_INC(net, search_restart);
+		goto begin;
+	}
+
 	rcu_read_unlock_bh();
 
 	return 0;
@@ -1791,6 +1834,7 @@ void nf_conntrack_init_end(void)
 
 int nf_conntrack_init_net(struct net *net)
 {
+	static atomic64_t unique_id;
 	int ret = -ENOMEM;
 	int cpu;
 
@@ -1814,7 +1858,8 @@ int nf_conntrack_init_net(struct net *net)
 	if (!net->ct.stat)
 		goto err_pcpu_lists;
 
-	net->ct.slabname = kasprintf(GFP_KERNEL, "nf_conntrack_%p", net);
+	net->ct.slabname = kasprintf(GFP_KERNEL, "nf_conntrack_%llu",
+				(u64)atomic64_inc_return(&unique_id));
 	if (!net->ct.slabname)
 		goto err_slabname;
 

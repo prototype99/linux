@@ -25,14 +25,16 @@
 #define COMMON_FEATURES (NETIF_F_SG | NETIF_F_FRAGLIST | NETIF_F_HIGHDMA | \
 			 NETIF_F_GSO_MASK | NETIF_F_HW_CSUM)
 
+static struct lock_class_key bridge_netdev_addr_lock_key;
+
 /* net device transmit always called with BH disabled */
 netdev_tx_t br_dev_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct net_bridge *br = netdev_priv(dev);
-	const unsigned char *dest = skb->data;
 	struct net_bridge_fdb_entry *dst;
 	struct net_bridge_mdb_entry *mdst;
 	struct pcpu_sw_netstats *brstats = this_cpu_ptr(br->stats);
+	const unsigned char *dest;
 	u16 vid = 0;
 
 	rcu_read_lock();
@@ -57,6 +59,7 @@ netdev_tx_t br_dev_xmit(struct sk_buff *skb, struct net_device *dev)
 	if (!br_allowed_ingress(br, br_get_vlan_info(br), skb, &vid))
 		goto out;
 
+	dest = eth_hdr(skb)->h_dest;
 	if (is_broadcast_ether_addr(dest))
 		br_flood_deliver(br, skb, false);
 	else if (is_multicast_ether_addr(dest)) {
@@ -85,6 +88,11 @@ out:
 	return NETDEV_TX_OK;
 }
 
+static void br_set_lockdep_class(struct net_device *dev)
+{
+	lockdep_set_class(&dev->addr_list_lock, &bridge_netdev_addr_lock_key);
+}
+
 static int br_dev_init(struct net_device *dev)
 {
 	struct net_bridge *br = netdev_priv(dev);
@@ -92,6 +100,7 @@ static int br_dev_init(struct net_device *dev)
 	br->stats = netdev_alloc_pcpu_stats(struct pcpu_sw_netstats);
 	if (!br->stats)
 		return -ENOMEM;
+	br_set_lockdep_class(dev);
 
 	return 0;
 }
@@ -183,6 +192,12 @@ static int br_set_mac_address(struct net_device *dev, void *p)
 
 	if (!is_valid_ether_addr(addr->sa_data))
 		return -EADDRNOTAVAIL;
+
+	/* dev_set_mac_addr() can be called by a master device on bridge's
+	 * NETDEV_UNREGISTER, but since it's being destroyed do nothing
+	 */
+	if (dev->reg_state != NETREG_REGISTERED)
+		return -EBUSY;
 
 	spin_lock_bh(&br->lock);
 	if (!ether_addr_equal(dev->dev_addr, addr->sa_data)) {

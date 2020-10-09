@@ -98,7 +98,8 @@
 /* Use the maximum between 16384 and a single page */
 #define MLX4_EN_ALLOC_SIZE	PAGE_ALIGN(16384)
 
-#define MLX4_EN_ALLOC_PREFER_ORDER	PAGE_ALLOC_COSTLY_ORDER
+#define MLX4_EN_ALLOC_PREFER_ORDER min_t(int, get_order(32768),		\
+					 PAGE_ALLOC_COSTLY_ORDER)
 
 /* Receive fragment sizes; we use at most 3 fragments (for 9600 byte MTU
  * and 4K allocations) */
@@ -134,6 +135,9 @@ enum {
 
 #define MLX4_EN_TX_COAL_PKTS	16
 #define MLX4_EN_TX_COAL_TIME	0x10
+
+#define MLX4_EN_MAX_COAL_PKTS	U16_MAX
+#define MLX4_EN_MAX_COAL_TIME	U16_MAX
 
 #define MLX4_EN_RX_RATE_LOW		400000
 #define MLX4_EN_RX_COAL_TIME_LOW	0
@@ -521,8 +525,8 @@ struct mlx4_en_priv {
 	u16 rx_usecs_low;
 	u32 pkt_rate_high;
 	u16 rx_usecs_high;
-	u16 sample_interval;
-	u16 adaptive_rx_coal;
+	u32 sample_interval;
+	u32 adaptive_rx_coal;
 	u32 msg_enable;
 	u32 loopback_ok;
 	u32 validate_loopback;
@@ -758,6 +762,7 @@ int mlx4_en_activate_tx_ring(struct mlx4_en_priv *priv,
 void mlx4_en_deactivate_tx_ring(struct mlx4_en_priv *priv,
 				struct mlx4_en_tx_ring *ring);
 void mlx4_en_set_num_rx_rings(struct mlx4_en_dev *mdev);
+void mlx4_en_recover_from_oom(struct mlx4_en_priv *priv);
 int mlx4_en_create_rx_ring(struct mlx4_en_priv *priv,
 			   struct mlx4_en_rx_ring **pring,
 			   u32 size, u16 stride, int node);

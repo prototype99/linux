@@ -16,7 +16,6 @@
 #endif
 #include <asm/thread_info.h>
 #include <asm/cpumask.h>
-#include <asm/cpufeature.h>
 
 extern int smp_num_siblings;
 extern unsigned int num_processors;
@@ -69,6 +68,7 @@ struct smp_ops {
 	void (*smp_cpus_done)(unsigned max_cpus);
 
 	void (*stop_other_cpus)(int wait);
+	void (*crash_stop_other_cpus)(void);
 	void (*smp_send_reschedule)(int cpu);
 
 	int (*cpu_up)(unsigned cpu, struct task_struct *tidle);
@@ -203,16 +203,6 @@ extern int safe_smp_processor_id(void);
 #endif
 
 #ifdef CONFIG_X86_LOCAL_APIC
-
-#ifndef CONFIG_X86_64
-static inline int logical_smp_processor_id(void)
-{
-	/* we don't want to mark this access volatile - bad code generation */
-	return GET_APIC_LOGICAL_ID(apic_read(APIC_LDR));
-}
-
-#endif
-
 extern int hard_smp_processor_id(void);
 
 #else /* CONFIG_X86_LOCAL_APIC */

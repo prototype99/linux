@@ -362,6 +362,7 @@ int btrfs_dev_replace_start(struct btrfs_root *root,
 		break;
 	case BTRFS_IOCTL_DEV_REPLACE_STATE_STARTED:
 	case BTRFS_IOCTL_DEV_REPLACE_STATE_SUSPENDED:
+		ASSERT(0);
 		args->result = BTRFS_IOCTL_DEV_REPLACE_RESULT_ALREADY_STARTED;
 		goto leave;
 	}
@@ -406,6 +407,10 @@ int btrfs_dev_replace_start(struct btrfs_root *root,
 	if (IS_ERR(trans)) {
 		ret = PTR_ERR(trans);
 		btrfs_dev_replace_lock(dev_replace);
+		dev_replace->replace_state =
+			BTRFS_IOCTL_DEV_REPLACE_STATE_NEVER_STARTED;
+		dev_replace->srcdev = NULL;
+		dev_replace->tgtdev = NULL;
 		goto leave;
 	}
 
@@ -423,8 +428,6 @@ int btrfs_dev_replace_start(struct btrfs_root *root,
 	return 0;
 
 leave:
-	dev_replace->srcdev = NULL;
-	dev_replace->tgtdev = NULL;
 	btrfs_dev_replace_unlock(dev_replace);
 leave_no_lock:
 	if (tgt_device)
@@ -567,6 +570,8 @@ static int btrfs_dev_replace_finishing(struct btrfs_fs_info *fs_info,
 	btrfs_kobj_rm_device(fs_info, src_device);
 	btrfs_kobj_add_device(fs_info, tgt_device);
 
+	btrfs_dev_replace_unlock(dev_replace);
+
 	btrfs_rm_dev_replace_blocked(fs_info);
 
 	btrfs_rm_dev_replace_srcdev(fs_info, src_device);
@@ -580,7 +585,6 @@ static int btrfs_dev_replace_finishing(struct btrfs_fs_info *fs_info,
 	 * superblock is scratched out so that it is no longer marked to
 	 * belong to this filesystem.
 	 */
-	btrfs_dev_replace_unlock(dev_replace);
 	mutex_unlock(&root->fs_info->fs_devices->device_list_mutex);
 	mutex_unlock(&root->fs_info->chunk_mutex);
 
@@ -610,7 +614,7 @@ static void btrfs_dev_replace_update_device_in_mapping_tree(
 		em = lookup_extent_mapping(em_tree, start, (u64)-1);
 		if (!em)
 			break;
-		map = (struct map_lookup *)em->bdev;
+		map = em->map_lookup;
 		for (i = 0; i < map->num_stripes; i++)
 			if (srcdev == map->stripes[i].dev)
 				map->stripes[i].dev = tgtdev;
@@ -778,6 +782,8 @@ int btrfs_resume_dev_replace_async(struct btrfs_fs_info *fs_info)
 		btrfs_info(fs_info, "cannot continue dev_replace, tgtdev is missing");
 		btrfs_info(fs_info,
 			"you may cancel the operation after 'mount -o degraded'");
+		dev_replace->replace_state =
+					BTRFS_IOCTL_DEV_REPLACE_STATE_SUSPENDED;
 		btrfs_dev_replace_unlock(dev_replace);
 		return 0;
 	}

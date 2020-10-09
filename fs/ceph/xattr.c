@@ -284,8 +284,7 @@ static size_t ceph_vxattrs_name_size(struct ceph_vxattr *vxattrs)
 		return ceph_dir_vxattrs_name_size;
 	if (vxattrs == ceph_file_vxattrs)
 		return ceph_file_vxattrs_name_size;
-	BUG();
-
+	BUG_ON(vxattrs);
 	return 0;
 }
 
@@ -369,6 +368,7 @@ static int __set_xattr(struct ceph_inode_info *ci,
 
 	if (update_xattr) {
 		int err = 0;
+
 		if (xattr && (flags & XATTR_CREATE))
 			err = -EEXIST;
 		else if (!xattr && (flags & XATTR_REPLACE))
@@ -376,12 +376,14 @@ static int __set_xattr(struct ceph_inode_info *ci,
 		if (err) {
 			kfree(name);
 			kfree(val);
+			kfree(*newxattr);
 			return err;
 		}
 		if (update_xattr < 0) {
 			if (xattr)
 				__remove_xattr(ci, xattr);
 			kfree(name);
+			kfree(*newxattr);
 			return 0;
 		}
 	}
@@ -1126,3 +1128,10 @@ int ceph_removexattr(struct dentry *dentry, const char *name)
 
 	return __ceph_removexattr(dentry, name);
 }
+
+#ifdef CONFIG_SECURITY
+bool ceph_security_xattr_wanted(struct inode *in)
+{
+	return in->i_security != NULL;
+}
+#endif

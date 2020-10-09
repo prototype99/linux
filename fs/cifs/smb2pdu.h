@@ -82,8 +82,8 @@
 
 #define NUMBER_OF_SMB2_COMMANDS	0x0013
 
-/* BB FIXME - analyze following length BB */
-#define MAX_SMB2_HDR_SIZE 0x78 /* 4 len + 64 hdr + (2*24 wct) + 2 bct + 2 pad */
+/* 4 len + 52 transform hdr + 64 hdr + 56 create rsp */
+#define MAX_SMB2_HDR_SIZE 0x00b0
 
 #define SMB2_PROTO_NUMBER __constant_cpu_to_le32(0x424d53fe)
 
@@ -245,7 +245,7 @@ struct smb2_sess_setup_req {
 	__le32 Channel;
 	__le16 SecurityBufferOffset;
 	__le16 SecurityBufferLength;
-	__le64 PreviousSessionId;
+	__u64 PreviousSessionId;
 	__u8   Buffer[1];	/* variable length GSS security buffer */
 } __packed;
 
@@ -510,16 +510,14 @@ struct create_context {
 #define SMB2_LEASE_KEY_SIZE 16
 
 struct lease_context {
-	__le64 LeaseKeyLow;
-	__le64 LeaseKeyHigh;
+	u8 LeaseKey[SMB2_LEASE_KEY_SIZE];
 	__le32 LeaseState;
 	__le32 LeaseFlags;
 	__le64 LeaseDuration;
 } __packed;
 
 struct lease_context_v2 {
-	__le64 LeaseKeyLow;
-	__le64 LeaseKeyHigh;
+	u8 LeaseKey[SMB2_LEASE_KEY_SIZE];
 	__le32 LeaseState;
 	__le32 LeaseFlags;
 	__le64 LeaseDuration;
@@ -946,6 +944,17 @@ struct smb3_fs_ss_info {
 	__le32 Flags;
 	__le32 ByteOffsetForSectorAlignment;
 	__le32 ByteOffsetForPartitionAlignment;
+} __packed;
+
+/* volume info struct - see MS-FSCC 2.5.9 */
+#define MAX_VOL_LABEL_LEN	32
+struct smb3_fs_vol_info {
+	__le64	VolumeCreationTime;
+	__u32	VolumeSerialNumber;
+	__le32	VolumeLabelLength; /* includes trailing null */
+	__u8	SupportsObjects; /* True if eg like NTFS, supports objects */
+	__u8	Reserved;
+	__u8	VolumeLabel[0]; /* variable len */
 } __packed;
 
 /* partial list of QUERY INFO levels */

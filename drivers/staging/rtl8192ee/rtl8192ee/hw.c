@@ -523,17 +523,17 @@ void rtl92ee_set_hw_reg(struct ieee80211_hw *hw, u8 variable, u8 *val)
 			fac = (1 << (fac + 2));
 			if (fac > 0xf)
 				fac = 0xf;
-				for (i = 0; i < 4; i++) {
+			for (i = 0; i < 4; i++) {
 				if ((reg[i] & 0xf0) > (fac << 4))
 					reg[i] = (reg[i] & 0x0f) | (fac << 4);
 				if ((reg[i] & 0x0f) > fac)
 					reg[i] = (reg[i] & 0xf0) | fac;
-					rtl_write_byte(rtlpriv,
-						       (REG_AGGLEN_LMT + i),
-						       reg[i]);
-				}
-				RT_TRACE(COMP_MLME, DBG_LOUD,
-					("Set HW_VAR_AMPDU_FACTOR:%#x\n", fac));
+				rtl_write_byte(rtlpriv,
+					       (REG_AGGLEN_LMT + i),
+					       reg[i]);
+			}
+			RT_TRACE(COMP_MLME, DBG_LOUD,
+				 ("Set HW_VAR_AMPDU_FACTOR:%#x\n", fac));
 		}
 		break; }
 	case HW_VAR_AC_PARAM:{
@@ -1006,7 +1006,7 @@ static void _rtl92ee_hw_configure(struct ieee80211_hw *hw)
 	rtl_write_word(rtlpriv, REG_SIFS_TRX, 0x100a);
 
 	/* Note Data sheet don't define */
-	rtl_write_word(rtlpriv, 0x4C7, 0x80);
+	rtl_write_byte(rtlpriv, 0x4C7, 0x80);
 
 	rtl_write_byte(rtlpriv, REG_RX_PKT_LIMIT, 0x20);
 

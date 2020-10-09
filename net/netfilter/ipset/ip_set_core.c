@@ -635,7 +635,7 @@ ip_set_nfnl_get_byindex(struct net *net, ip_set_id_t index)
 	struct ip_set *set;
 	struct ip_set_net *inst = ip_set_pernet(net);
 
-	if (index > inst->ip_set_max)
+	if (index >= inst->ip_set_max)
 		return IPSET_INVALID_ID;
 
 	nfnl_lock(NFNL_SUBSYS_IPSET);
@@ -1549,6 +1549,7 @@ ip_set_utest(struct sock *ctnl, struct sk_buff *skb,
 	struct ip_set *set;
 	struct nlattr *tb[IPSET_ATTR_ADT_MAX+1] = {};
 	int ret = 0;
+	u32 lineno;
 
 	if (unlikely(protocol_failed(attr) ||
 		     attr[IPSET_ATTR_SETNAME] == NULL ||
@@ -1565,7 +1566,7 @@ ip_set_utest(struct sock *ctnl, struct sk_buff *skb,
 		return -IPSET_ERR_PROTOCOL;
 
 	read_lock_bh(&set->lock);
-	ret = set->variant->uadt(set, tb, IPSET_TEST, NULL, 0, 0);
+	ret = set->variant->uadt(set, tb, IPSET_TEST, &lineno, 0, 0);
 	read_unlock_bh(&set->lock);
 	/* Userspace can't trigger element to be re-added */
 	if (ret == -EAGAIN)
@@ -1838,6 +1839,12 @@ ip_set_sockfn_get(struct sock *sk, int optval, void __user *user, int *len)
 	if (*op < IP_SET_OP_VERSION) {
 		/* Check the version at the beginning of operations */
 		struct ip_set_req_version *req_version = data;
+
+		if (*len < sizeof(struct ip_set_req_version)) {
+			ret = -EINVAL;
+			goto done;
+		}
+
 		if (req_version->version != IPSET_PROTOCOL) {
 			ret = -EPROTO;
 			goto done;
@@ -1854,8 +1861,9 @@ ip_set_sockfn_get(struct sock *sk, int optval, void __user *user, int *len)
 		}
 
 		req_version->version = IPSET_PROTOCOL;
-		ret = copy_to_user(user, req_version,
-				   sizeof(struct ip_set_req_version));
+		if (copy_to_user(user, req_version,
+				 sizeof(struct ip_set_req_version)))
+			ret = -EFAULT;
 		goto done;
 	}
 	case IP_SET_OP_GET_BYNAME: {
@@ -1912,7 +1920,8 @@ ip_set_sockfn_get(struct sock *sk, int optval, void __user *user, int *len)
 	}	/* end of switch(op) */
 
 copy:
-	ret = copy_to_user(user, data, copylen);
+	if (copy_to_user(user, data, copylen))
+		ret = -EFAULT;
 
 done:
 	vfree(data);
@@ -1976,24 +1985,28 @@ static struct pernet_operations ip_set_net_ops = {
 static int __init
 ip_set_init(void)
 {
-	int ret = nfnetlink_subsys_register(&ip_set_netlink_subsys);
-	if (ret != 0) {
-		pr_err("ip_set: cannot register with nfnetlink.\n");
+	int ret = register_pernet_subsys(&ip_set_net_ops);
+
+	if (ret) {
+		pr_err("ip_set: cannot register pernet_subsys.\n");
 		return ret;
 	}
+
+	ret = nfnetlink_subsys_register(&ip_set_netlink_subsys);
+	if (ret != 0) {
+		pr_err("ip_set: cannot register with nfnetlink.\n");
+		unregister_pernet_subsys(&ip_set_net_ops);
+		return ret;
+	}
+
 	ret = nf_register_sockopt(&so_set);
 	if (ret != 0) {
 		pr_err("SO_SET registry failed: %d\n", ret);
 		nfnetlink_subsys_unregister(&ip_set_netlink_subsys);
+		unregister_pernet_subsys(&ip_set_net_ops);
 		return ret;
 	}
-	ret = register_pernet_subsys(&ip_set_net_ops);
-	if (ret) {
-		pr_err("ip_set: cannot register pernet_subsys.\n");
-		nf_unregister_sockopt(&so_set);
-		nfnetlink_subsys_unregister(&ip_set_netlink_subsys);
-		return ret;
-	}
+
 	pr_info("ip_set: protocol %u\n", IPSET_PROTOCOL);
 	return 0;
 }
@@ -2001,9 +2014,10 @@ ip_set_init(void)
 static void __exit
 ip_set_fini(void)
 {
-	unregister_pernet_subsys(&ip_set_net_ops);
 	nf_unregister_sockopt(&so_set);
 	nfnetlink_subsys_unregister(&ip_set_netlink_subsys);
+
+	unregister_pernet_subsys(&ip_set_net_ops);
 	pr_debug("these are the famous last words\n");
 }
 

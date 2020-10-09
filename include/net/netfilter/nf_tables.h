@@ -113,6 +113,7 @@ static inline enum nft_registers nft_type_to_reg(enum nft_data_types type)
 	return type == NFT_DATA_VERDICT ? NFT_REG_VERDICT : NFT_REG_1;
 }
 
+int nft_parse_u32_check(const struct nlattr *attr, int max, u32 *dest);
 int nft_validate_input_register(enum nft_registers reg);
 int nft_validate_output_register(enum nft_registers reg);
 int nft_validate_data_load(const struct nft_ctx *ctx, enum nft_registers reg,
@@ -182,7 +183,7 @@ enum nft_set_class {
  *	@class: lookup performance class
  */
 struct nft_set_estimate {
-	unsigned int		size;
+	u64			size;
 	enum nft_set_class	class;
 };
 
@@ -214,7 +215,7 @@ struct nft_set_ops {
 						const struct nft_set *set,
 						struct nft_set_iter *iter);
 
-	unsigned int			(*privsize)(const struct nlattr * const nla[]);
+	u64				(*privsize)(const struct nlattr * const nla[]);
 	bool				(*estimate)(const struct nft_set_desc *desc,
 						    u32 features,
 						    struct nft_set_estimate *est);
@@ -363,7 +364,8 @@ struct nft_expr_ops {
  */
 struct nft_expr {
 	const struct nft_expr_ops	*ops;
-	unsigned char			data[];
+	unsigned char			data[]
+		__attribute__((aligned(__alignof__(u64))));
 };
 
 static inline void *nft_expr_priv(const struct nft_expr *expr)

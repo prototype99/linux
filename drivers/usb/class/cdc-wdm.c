@@ -245,7 +245,7 @@ static void wdm_int_callback(struct urb *urb)
 	case USB_CDC_NOTIFY_RESPONSE_AVAILABLE:
 		dev_dbg(&desc->intf->dev,
 			"NOTIFY_RESPONSE_AVAILABLE received: index %d len %d",
-			dr->wIndex, dr->wLength);
+			le16_to_cpu(dr->wIndex), le16_to_cpu(dr->wLength));
 		break;
 
 	case USB_CDC_NOTIFY_NETWORK_CONNECTION:
@@ -262,7 +262,9 @@ static void wdm_int_callback(struct urb *urb)
 		clear_bit(WDM_POLL_RUNNING, &desc->flags);
 		dev_err(&desc->intf->dev,
 			"unknown notification %d received: index %d len %d\n",
-			dr->bNotificationType, dr->wIndex, dr->wLength);
+			dr->bNotificationType,
+			le16_to_cpu(dr->wIndex),
+			le16_to_cpu(dr->wLength));
 		goto exit;
 	}
 
@@ -408,7 +410,7 @@ static ssize_t wdm_write
 			     USB_RECIP_INTERFACE);
 	req->bRequest = USB_CDC_SEND_ENCAPSULATED_COMMAND;
 	req->wValue = 0;
-	req->wIndex = desc->inum;
+	req->wIndex = desc->inum; /* already converted */
 	req->wLength = cpu_to_le16(count);
 	set_bit(WDM_IN_USE, &desc->flags);
 	desc->outbuf = buf;
@@ -422,7 +424,7 @@ static ssize_t wdm_write
 		rv = usb_translate_errors(rv);
 	} else {
 		dev_dbg(&desc->intf->dev, "Tx URB has been submitted index=%d",
-			req->wIndex);
+			le16_to_cpu(req->wIndex));
 	}
 out:
 	usb_autopm_put_interface(desc->intf);
@@ -574,10 +576,20 @@ static int wdm_flush(struct file *file, fl_owner_t id)
 {
 	struct wdm_device *desc = file->private_data;
 
-	wait_event(desc->wait, !test_bit(WDM_IN_USE, &desc->flags));
+	wait_event(desc->wait,
+			/*
+			 * needs both flags. We cannot do with one
+			 * because resetting it would cause a race
+			 * with write() yet we need to signal
+			 * a disconnect
+			 */
+			!test_bit(WDM_IN_USE, &desc->flags) ||
+			test_bit(WDM_DISCONNECTING, &desc->flags));
 
 	/* cannot dereference desc->intf if WDM_DISCONNECTING */
-	if (desc->werr < 0 && !test_bit(WDM_DISCONNECTING, &desc->flags))
+	if (test_bit(WDM_DISCONNECTING, &desc->flags))
+		return -ENODEV;
+	if (desc->werr < 0)
 		dev_err(&desc->intf->dev, "Error in flush path: %d\n",
 			desc->werr);
 
@@ -820,7 +832,7 @@ static int wdm_create(struct usb_interface *intf, struct usb_endpoint_descriptor
 	desc->irq->bRequestType = (USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE);
 	desc->irq->bRequest = USB_CDC_GET_ENCAPSULATED_RESPONSE;
 	desc->irq->wValue = 0;
-	desc->irq->wIndex = desc->inum;
+	desc->irq->wIndex = desc->inum; /* already converted */
 	desc->irq->wLength = cpu_to_le16(desc->wMaxCommand);
 
 	usb_fill_control_urb(
@@ -965,8 +977,6 @@ static void wdm_disconnect(struct usb_interface *intf)
 	spin_lock_irqsave(&desc->iuspin, flags);
 	set_bit(WDM_DISCONNECTING, &desc->flags);
 	set_bit(WDM_READ, &desc->flags);
-	/* to terminate pending flushes */
-	clear_bit(WDM_IN_USE, &desc->flags);
 	spin_unlock_irqrestore(&desc->iuspin, flags);
 	wake_up_all(&desc->wait);
 	mutex_lock(&desc->rlock);
@@ -1087,7 +1097,7 @@ static int wdm_post_reset(struct usb_interface *intf)
 	rv = recover_from_urb_loss(desc);
 	mutex_unlock(&desc->wlock);
 	mutex_unlock(&desc->rlock);
-	return 0;
+	return rv;
 }
 
 static struct usb_driver wdm_driver = {

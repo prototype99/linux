@@ -76,8 +76,8 @@ static const char	hcd_name [] = "ohci_hcd";
 #include "ohci.h"
 #include "pci-quirks.h"
 
-static void ohci_dump (struct ohci_hcd *ohci, int verbose);
-static void ohci_stop (struct usb_hcd *hcd);
+static void ohci_dump(struct ohci_hcd *ohci);
+static void ohci_stop(struct usb_hcd *hcd);
 
 #include "ohci-hub.c"
 #include "ohci-dbg.c"
@@ -392,8 +392,7 @@ static void ohci_usb_reset (struct ohci_hcd *ohci)
  * other cases where the next software may expect clean state from the
  * "firmware".  this is bus-neutral, unlike shutdown() methods.
  */
-static void
-ohci_shutdown (struct usb_hcd *hcd)
+static void _ohci_shutdown(struct usb_hcd *hcd)
 {
 	struct ohci_hcd *ohci;
 
@@ -406,6 +405,16 @@ ohci_shutdown (struct usb_hcd *hcd)
 	udelay(10);
 
 	ohci_writel(ohci, ohci->fminterval, &ohci->regs->fminterval);
+}
+
+static void ohci_shutdown(struct usb_hcd *hcd)
+{
+	struct ohci_hcd	*ohci = hcd_to_ohci(hcd);
+	unsigned long flags;
+
+	spin_lock_irqsave(&ohci->lock, flags);
+	_ohci_shutdown(hcd);
+	spin_unlock_irqrestore(&ohci->lock, flags);
 }
 
 static int check_ed(struct ohci_hcd *ohci, struct ed *ed)
@@ -744,7 +753,7 @@ retry:
 		ohci->ed_to_check = NULL;
 	}
 
-	ohci_dump (ohci, 1);
+	ohci_dump(ohci);
 
 	return 0;
 }
@@ -825,7 +834,7 @@ static irqreturn_t ohci_irq (struct usb_hcd *hcd)
 			usb_hc_died(hcd);
 		}
 
-		ohci_dump (ohci, 1);
+		ohci_dump(ohci);
 		ohci_usb_reset (ohci);
 	}
 
@@ -925,7 +934,7 @@ static void ohci_stop (struct usb_hcd *hcd)
 {
 	struct ohci_hcd		*ohci = hcd_to_ohci (hcd);
 
-	ohci_dump (ohci, 1);
+	ohci_dump(ohci);
 
 	if (quirk_nec(ohci))
 		flush_work(&ohci->nec_work);

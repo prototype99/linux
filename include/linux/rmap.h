@@ -37,6 +37,16 @@ struct anon_vma {
 	atomic_t refcount;
 
 	/*
+	 * Count of child anon_vmas and VMAs which points to this anon_vma.
+	 *
+	 * This counter is used for making decision about reusing anon_vma
+	 * instead of forking new one. See comments in function anon_vma_clone.
+	 */
+	unsigned degree;
+
+	struct anon_vma *parent;	/* Parent of this anon_vma */
+
+	/*
 	 * NOTE: the LSB of the rb_root.rb_node is set by
 	 * mm_take_all_locks() _after_ taking the above lock. So the
 	 * rb_root must only be read/written after taking the above lock
@@ -101,20 +111,6 @@ static inline struct anon_vma *page_anon_vma(struct page *page)
 					    PAGE_MAPPING_ANON)
 		return NULL;
 	return page_rmapping(page);
-}
-
-static inline void vma_lock_anon_vma(struct vm_area_struct *vma)
-{
-	struct anon_vma *anon_vma = vma->anon_vma;
-	if (anon_vma)
-		down_write(&anon_vma->root->rwsem);
-}
-
-static inline void vma_unlock_anon_vma(struct vm_area_struct *vma)
-{
-	struct anon_vma *anon_vma = vma->anon_vma;
-	if (anon_vma)
-		up_write(&anon_vma->root->rwsem);
 }
 
 static inline void anon_vma_lock_write(struct anon_vma *anon_vma)
@@ -236,7 +232,6 @@ int page_mapped_in_vma(struct page *page, struct vm_area_struct *vma);
  * arg: passed to rmap_one() and invalid_vma()
  * rmap_one: executed on each vma where page is mapped
  * done: for checking traversing termination condition
- * file_nonlinear: for handling file nonlinear mapping
  * anon_lock: for getting anon_lock by optimized way rather than default
  * invalid_vma: for skipping uninterested vma
  */
@@ -245,7 +240,6 @@ struct rmap_walk_control {
 	int (*rmap_one)(struct page *page, struct vm_area_struct *vma,
 					unsigned long addr, void *arg);
 	int (*done)(struct page *page);
-	int (*file_nonlinear)(struct page *, struct address_space *, void *arg);
 	struct anon_vma *(*anon_lock)(struct page *page);
 	bool (*invalid_vma)(struct vm_area_struct *vma, void *arg);
 };

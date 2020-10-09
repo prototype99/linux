@@ -94,6 +94,7 @@ enum {
 	IPOIB_FLAG_UMCAST	  = 10,
 	IPOIB_STOP_NEIGH_GC	  = 11,
 	IPOIB_NEIGH_TBL_FLUSH	  = 12,
+	IPOIB_FLAG_GOING_DOWN	  = 15,
 
 	IPOIB_MAX_BACKOFF_SECONDS = 16,
 
@@ -227,7 +228,6 @@ struct ipoib_cm_tx {
 	struct list_head     list;
 	struct net_device   *dev;
 	struct ipoib_neigh  *neigh;
-	struct ipoib_path   *path;
 	struct ipoib_cm_tx_buf *tx_ring;
 	unsigned	     tx_head;
 	unsigned	     tx_tail;
@@ -383,6 +383,7 @@ struct ipoib_ah {
 	struct list_head   list;
 	struct kref	   ref;
 	unsigned	   last_send;
+	int  		   valid;
 };
 
 struct ipoib_path {
@@ -399,7 +400,6 @@ struct ipoib_path {
 
 	struct rb_node	      rb_node;
 	struct list_head      list;
-	int  		      valid;
 };
 
 struct ipoib_neigh {
@@ -462,6 +462,7 @@ void ipoib_send(struct net_device *dev, struct sk_buff *skb,
 		struct ipoib_ah *address, u32 qpn);
 void ipoib_reap_ah(struct work_struct *work);
 
+struct ipoib_path *__path_find(struct net_device *dev, void *gid);
 void ipoib_mark_paths_invalid(struct net_device *dev);
 void ipoib_flush_paths(struct net_device *dev);
 struct ipoib_dev_priv *ipoib_intf_alloc(const char *format);

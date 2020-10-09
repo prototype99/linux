@@ -42,6 +42,8 @@
 #include "extent_io.h"
 #include "extent_map.h"
 
+static const char* const btrfs_compress_types[] = { "", "zlib", "lzo" };
+
 struct compressed_bio {
 	/* number of bios pending for this compressed extent */
 	atomic_t pending_bios;
@@ -80,6 +82,22 @@ struct compressed_bio {
 	 */
 	u32 sums;
 };
+
+bool btrfs_compress_is_valid_type(const char *str, size_t len)
+{
+	int i;
+
+	for (i = 1; i < ARRAY_SIZE(btrfs_compress_types); i++) {
+		size_t comp_len = strlen(btrfs_compress_types[i]);
+
+		if (len < comp_len)
+			continue;
+
+		if (!strncmp(btrfs_compress_types[i], str, comp_len))
+			return true;
+	}
+	return false;
+}
 
 static int btrfs_decompress_biovec(int type, struct page **pages_in,
 				   u64 disk_start, struct bio_vec *bvec,
@@ -1010,8 +1028,6 @@ int btrfs_decompress_buf2page(char *buf, unsigned long buf_start,
 		bytes = min(bytes, working_bytes);
 		kaddr = kmap_atomic(page_out);
 		memcpy(kaddr + *pg_offset, buf + buf_offset, bytes);
-		if (*pg_index == (vcnt - 1) && *pg_offset == 0)
-			memset(kaddr + bytes, 0, PAGE_CACHE_SIZE - bytes);
 		kunmap_atomic(kaddr);
 		flush_dcache_page(page_out);
 
@@ -1052,4 +1068,35 @@ int btrfs_decompress_buf2page(char *buf, unsigned long buf_start,
 	}
 
 	return 1;
+}
+
+/*
+ * When uncompressing data, we need to make sure and zero any parts of
+ * the biovec that were not filled in by the decompression code.  pg_index
+ * and pg_offset indicate the last page and the last offset of that page
+ * that have been filled in.  This will zero everything remaining in the
+ * biovec.
+ */
+void btrfs_clear_biovec_end(struct bio_vec *bvec, int vcnt,
+				   unsigned long pg_index,
+				   unsigned long pg_offset)
+{
+	while (pg_index < vcnt) {
+		struct page *page = bvec[pg_index].bv_page;
+		unsigned long off = bvec[pg_index].bv_offset;
+		unsigned long len = bvec[pg_index].bv_len;
+
+		if (pg_offset < off)
+			pg_offset = off;
+		if (pg_offset < off + len) {
+			unsigned long bytes = off + len - pg_offset;
+			char *kaddr;
+
+			kaddr = kmap_atomic(page);
+			memset(kaddr + pg_offset, 0, bytes);
+			kunmap_atomic(kaddr);
+		}
+		pg_index++;
+		pg_offset = 0;
+	}
 }

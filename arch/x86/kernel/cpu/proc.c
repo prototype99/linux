@@ -69,8 +69,8 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 		   c->x86_model,
 		   c->x86_model_id[0] ? c->x86_model_id : "unknown");
 
-	if (c->x86_mask || c->cpuid_level >= 0)
-		seq_printf(m, "stepping\t: %d\n", c->x86_mask);
+	if (c->x86_stepping || c->cpuid_level >= 0)
+		seq_printf(m, "stepping\t: %d\n", c->x86_stepping);
 	else
 		seq_printf(m, "stepping\t: unknown\n");
 	if (c->microcode)
@@ -86,8 +86,8 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 	}
 
 	/* Cache size */
-	if (c->x86_cache_size >= 0)
-		seq_printf(m, "cache size\t: %d KB\n", c->x86_cache_size);
+	if (c->x86_cache_size)
+		seq_printf(m, "cache size\t: %u KB\n", c->x86_cache_size);
 
 	show_cpuinfo_core(m, c, cpu);
 	show_cpuinfo_misc(m, c);
@@ -96,6 +96,14 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 	for (i = 0; i < 32*NCAPINTS; i++)
 		if (cpu_has(c, i) && x86_cap_flags[i] != NULL)
 			seq_printf(m, " %s", x86_cap_flags[i]);
+
+	seq_printf(m, "\nbugs\t\t:");
+	for (i = 0; i < 32*NBUGINTS; i++) {
+		unsigned int bug_bit = 32*NCAPINTS + i;
+
+		if (cpu_has_bug(c, bug_bit) && x86_bug_flags[i])
+			seq_printf(m, " %s", x86_bug_flags[i]);
+	}
 
 	seq_printf(m, "\nbogomips\t: %lu.%02lu\n",
 		   c->loops_per_jiffy/(500000/HZ),

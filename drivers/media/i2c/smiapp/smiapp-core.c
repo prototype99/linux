@@ -899,7 +899,7 @@ static int smiapp_read_nvm(struct smiapp_sensor *sensor,
 		if (rval)
 			goto out;
 
-		for (i = 0; i < 1000; i++) {
+		for (i = 1000; i > 0; i--) {
 			rval = smiapp_read(
 				sensor,
 				SMIAPP_REG_U8_DATA_TRANSFER_IF_1_STATUS, &s);
@@ -910,11 +910,10 @@ static int smiapp_read_nvm(struct smiapp_sensor *sensor,
 			if (s & SMIAPP_DATA_TRANSFER_IF_1_STATUS_RD_READY)
 				break;
 
-			if (--i == 0) {
-				rval = -ETIMEDOUT;
-				goto out;
-			}
-
+		}
+		if (!i) {
+			rval = -ETIMEDOUT;
+			goto out;
 		}
 
 		for (i = 0; i < SMIAPP_NVM_PAGE_SIZE; i++) {
@@ -2138,7 +2137,7 @@ static int smiapp_set_selection(struct v4l2_subdev *subdev,
 		ret = smiapp_set_compose(subdev, fh, sel);
 		break;
 	default:
-		BUG();
+		ret = -EINVAL;
 	}
 
 	mutex_unlock(&sensor->mutex);
@@ -2625,7 +2624,9 @@ static int smiapp_registered(struct v4l2_subdev *subdev)
 		pll->flags |= SMIAPP_PLL_FLAG_NO_OP_CLOCKS;
 	pll->scale_n = sensor->limits[SMIAPP_LIMIT_SCALER_N_MIN];
 
+	mutex_lock(&sensor->mutex);
 	rval = smiapp_update_mode(sensor);
+	mutex_unlock(&sensor->mutex);
 	if (rval) {
 		dev_err(&client->dev, "update mode failed\n");
 		goto out_nvm_release;

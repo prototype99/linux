@@ -471,8 +471,6 @@ void __do_irq(struct pt_regs *regs)
 
 	trace_irq_entry(regs);
 
-	check_stack_overflow();
-
 	/*
 	 * Query the platform PIC for the interrupt & ack it.
 	 *
@@ -503,6 +501,8 @@ void do_IRQ(struct pt_regs *regs)
 	curtp = current_thread_info();
 	irqtp = hardirq_ctx[raw_smp_processor_id()];
 	sirqtp = softirq_ctx[raw_smp_processor_id()];
+
+	check_stack_overflow();
 
 	/* Already there ? */
 	if (unlikely(curtp == irqtp || curtp == sirqtp)) {
@@ -661,11 +661,6 @@ int irq_choose_cpu(const struct cpumask *mask)
 	return hard_smp_processor_id();
 }
 #endif
-
-int arch_early_irq_init(void)
-{
-	return 0;
-}
 
 #ifdef CONFIG_PPC64
 static int __init setup_noirqdistrib(char *str)

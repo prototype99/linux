@@ -401,9 +401,27 @@ int cifs_get_inode_info_unix(struct inode **pinode,
 			rc = -ENOMEM;
 	} else {
 		/* we already have inode, update it */
+
+		/* if uniqueid is different, return error */
+		if (unlikely(cifs_sb->mnt_cifs_flags & CIFS_MOUNT_SERVER_INUM &&
+		    CIFS_I(*pinode)->uniqueid != fattr.cf_uniqueid)) {
+			CIFS_I(*pinode)->time = 0; /* force reval */
+			rc = -ESTALE;
+			goto cgiiu_exit;
+		}
+
+		/* if filetype is different, return error */
+		if (unlikely(((*pinode)->i_mode & S_IFMT) !=
+		    (fattr.cf_mode & S_IFMT))) {
+			CIFS_I(*pinode)->time = 0; /* force reval */
+			rc = -ESTALE;
+			goto cgiiu_exit;
+		}
+
 		cifs_fattr_to_inode(*pinode, &fattr);
 	}
 
+cgiiu_exit:
 	return rc;
 }
 
@@ -446,6 +464,8 @@ cifs_sfu_type(struct cifs_fattr *fattr, const char *path,
 	oparms.cifs_sb = cifs_sb;
 	oparms.desired_access = GENERIC_READ;
 	oparms.create_options = CREATE_NOT_DIR;
+	if (backup_cred(cifs_sb))
+		oparms.create_options |= CREATE_OPEN_BACKUP_INTENT;
 	oparms.disposition = FILE_OPEN;
 	oparms.path = path;
 	oparms.fid = &fid;
@@ -733,7 +753,15 @@ cifs_get_inode_info(struct inode **inode, const char *full_path,
 	} else if (rc == -EREMOTE) {
 		cifs_create_dfs_fattr(&fattr, sb);
 		rc = 0;
-	} else if (rc == -EACCES && backup_cred(cifs_sb)) {
+	} else if ((rc == -EACCES) && backup_cred(cifs_sb) &&
+		   (strcmp(server->vals->version_string, SMB1_VERSION_STRING)
+		      == 0)) {
+			/*
+			 * For SMB2 and later the backup intent flag is already
+			 * sent if needed on open and there is no path based
+			 * FindFirst operation to use to retry with
+			 */
+
 			srchinf = kzalloc(sizeof(struct cifs_search_info),
 						GFP_KERNEL);
 			if (srchinf == NULL) {
@@ -789,8 +817,21 @@ cifs_get_inode_info(struct inode **inode, const char *full_path,
 			}
 		} else
 			fattr.cf_uniqueid = iunique(sb, ROOT_I);
-	} else
-		fattr.cf_uniqueid = CIFS_I(*inode)->uniqueid;
+	} else {
+		if ((cifs_sb->mnt_cifs_flags & CIFS_MOUNT_SERVER_INUM) &&
+		    validinum == false && server->ops->get_srv_inum) {
+			/*
+			 * Pass a NULL tcon to ensure we don't make a round
+			 * trip to the server. This only works for SMB2+.
+			 */
+			tmprc = server->ops->get_srv_inum(xid,
+				NULL, cifs_sb, full_path,
+				&fattr.cf_uniqueid, data);
+			if (tmprc)
+				fattr.cf_uniqueid = CIFS_I(*inode)->uniqueid;
+		} else
+			fattr.cf_uniqueid = CIFS_I(*inode)->uniqueid;
+	}
 
 	/* query for SFU type info if supported and needed */
 	if (fattr.cf_cifsattrs & ATTR_SYSTEM &&
@@ -829,6 +870,24 @@ cifs_get_inode_info(struct inode **inode, const char *full_path,
 		if (!*inode)
 			rc = -ENOMEM;
 	} else {
+		/* we already have inode, update it */
+
+		/* if uniqueid is different, return error */
+		if (unlikely(cifs_sb->mnt_cifs_flags & CIFS_MOUNT_SERVER_INUM &&
+		    CIFS_I(*inode)->uniqueid != fattr.cf_uniqueid)) {
+			CIFS_I(*inode)->time = 0; /* force reval */
+			rc = -ESTALE;
+			goto cgii_exit;
+		}
+
+		/* if filetype is different, return error */
+		if (unlikely(((*inode)->i_mode & S_IFMT) !=
+		    (fattr.cf_mode & S_IFMT))) {
+			CIFS_I(*inode)->time = 0; /* force reval */
+			rc = -ESTALE;
+			goto cgii_exit;
+		}
+
 		cifs_fattr_to_inode(*inode, &fattr);
 	}
 
@@ -887,7 +946,7 @@ inode_has_hashed_dentries(struct inode *inode)
 	struct dentry *dentry;
 
 	spin_lock(&inode->i_lock);
-	hlist_for_each_entry(dentry, &inode->i_dentry, d_alias) {
+	hlist_for_each_entry(dentry, &inode->i_dentry, d_u.d_alias) {
 		if (!d_unhashed(dentry) || IS_ROOT(dentry)) {
 			spin_unlock(&inode->i_lock);
 			return true;
@@ -950,12 +1009,29 @@ struct inode *cifs_root_iget(struct super_block *sb)
 	struct inode *inode = NULL;
 	long rc;
 	struct cifs_tcon *tcon = cifs_sb_master_tcon(cifs_sb);
+	char *path = NULL;
+	int len;
+
+	if ((cifs_sb->mnt_cifs_flags & CIFS_MOUNT_USE_PREFIX_PATH)
+	    && cifs_sb->prepath) {
+		len = strlen(cifs_sb->prepath);
+		path = kzalloc(len + 2 /* leading sep + null */, GFP_KERNEL);
+		if (path == NULL)
+			return ERR_PTR(-ENOMEM);
+		path[0] = '/';
+		memcpy(path+1, cifs_sb->prepath, len);
+	} else {
+		path = kstrdup("", GFP_KERNEL);
+		if (path == NULL)
+			return ERR_PTR(-ENOMEM);
+	}
 
 	xid = get_xid();
+	convert_delimiter(path, CIFS_DIR_SEP(cifs_sb));
 	if (tcon->unix_ext)
-		rc = cifs_get_inode_info_unix(&inode, "", sb, xid);
+		rc = cifs_get_inode_info_unix(&inode, path, sb, xid);
 	else
-		rc = cifs_get_inode_info(&inode, "", NULL, sb, xid, NULL);
+		rc = cifs_get_inode_info(&inode, path, NULL, sb, xid, NULL);
 
 	if (!inode) {
 		inode = ERR_PTR(rc);
@@ -983,6 +1059,7 @@ struct inode *cifs_root_iget(struct super_block *sb)
 	}
 
 out:
+	kfree(path);
 	/* can not call macro free_xid here since in a void func
 	 * TODO: This is no longer true
 	 */
@@ -1599,6 +1676,10 @@ cifs_do_rename(const unsigned int xid, struct dentry *from_dentry,
 	if (rc == 0 || rc != -EBUSY)
 		goto do_rename_exit;
 
+	/* Don't fall back to using SMB on SMB 2+ mount */
+	if (server->vals->protocol_id != 0)
+		goto do_rename_exit;
+
 	/* open-file renames don't work across directories */
 	if (to_dentry->d_parent != from_dentry->d_parent)
 		goto do_rename_exit;
@@ -1710,12 +1791,21 @@ cifs_rename(struct inode *source_dir, struct dentry *source_dentry,
 unlink_target:
 	/* Try unlinking the target dentry if it's not negative */
 	if (target_dentry->d_inode && (rc == -EACCES || rc == -EEXIST)) {
-		tmprc = cifs_unlink(target_dir, target_dentry);
+		if (d_is_dir(target_dentry))
+			tmprc = cifs_rmdir(target_dir, target_dentry);
+		else
+			tmprc = cifs_unlink(target_dir, target_dentry);
 		if (tmprc)
 			goto cifs_rename_exit;
 		rc = cifs_do_rename(xid, source_dentry, from_name,
 				    target_dentry, to_name);
 	}
+
+	/* force revalidate to go get info when needed */
+	CIFS_I(source_dir)->time = CIFS_I(target_dir)->time = 0;
+
+	source_dir->i_ctime = source_dir->i_mtime = target_dir->i_ctime =
+		target_dir->i_mtime = current_fs_time(source_dir->i_sb);
 
 cifs_rename_exit:
 	kfree(info_buf_source);
@@ -1983,7 +2073,6 @@ cifs_set_file_size(struct inode *inode, struct iattr *attrs,
 	struct tcon_link *tlink = NULL;
 	struct cifs_tcon *tcon = NULL;
 	struct TCP_Server_Info *server;
-	struct cifs_io_parms io_parms;
 
 	/*
 	 * To avoid spurious oplock breaks from server, in the case of
@@ -2005,18 +2094,6 @@ cifs_set_file_size(struct inode *inode, struct iattr *attrs,
 			rc = -ENOSYS;
 		cifsFileInfo_put(open_file);
 		cifs_dbg(FYI, "SetFSize for attrs rc = %d\n", rc);
-		if ((rc == -EINVAL) || (rc == -EOPNOTSUPP)) {
-			unsigned int bytes_written;
-
-			io_parms.netfid = open_file->fid.netfid;
-			io_parms.pid = open_file->pid;
-			io_parms.tcon = tcon;
-			io_parms.offset = 0;
-			io_parms.length = attrs->ia_size;
-			rc = CIFSSMBWrite(xid, &io_parms, &bytes_written,
-					  NULL, NULL, 1);
-			cifs_dbg(FYI, "Wrt seteof rc %d\n", rc);
-		}
 	} else
 		rc = -EINVAL;
 
@@ -2042,29 +2119,7 @@ cifs_set_file_size(struct inode *inode, struct iattr *attrs,
 	else
 		rc = -ENOSYS;
 	cifs_dbg(FYI, "SetEOF by path (setattrs) rc = %d\n", rc);
-	if ((rc == -EINVAL) || (rc == -EOPNOTSUPP)) {
-		__u16 netfid;
-		int oplock = 0;
 
-		rc = SMBLegacyOpen(xid, tcon, full_path, FILE_OPEN,
-				   GENERIC_WRITE, CREATE_NOT_DIR, &netfid,
-				   &oplock, NULL, cifs_sb->local_nls,
-				   cifs_sb->mnt_cifs_flags &
-						CIFS_MOUNT_MAP_SPECIAL_CHR);
-		if (rc == 0) {
-			unsigned int bytes_written;
-
-			io_parms.netfid = netfid;
-			io_parms.pid = current->tgid;
-			io_parms.tcon = tcon;
-			io_parms.offset = 0;
-			io_parms.length = attrs->ia_size;
-			rc = CIFSSMBWrite(xid, &io_parms, &bytes_written, NULL,
-					  NULL,  1);
-			cifs_dbg(FYI, "wrt seteof rc %d\n", rc);
-			CIFSSMBClose(xid, tcon, netfid);
-		}
-	}
 	if (tlink)
 		cifs_put_tlink(tlink);
 
@@ -2100,7 +2155,7 @@ cifs_setattr_unix(struct dentry *direntry, struct iattr *attrs)
 	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_NO_PERM)
 		attrs->ia_valid |= ATTR_FORCE;
 
-	rc = inode_change_ok(inode, attrs);
+	rc = setattr_prepare(direntry, attrs);
 	if (rc < 0)
 		goto out;
 
@@ -2241,7 +2296,7 @@ cifs_setattr_nounix(struct dentry *direntry, struct iattr *attrs)
 	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_NO_PERM)
 		attrs->ia_valid |= ATTR_FORCE;
 
-	rc = inode_change_ok(inode, attrs);
+	rc = setattr_prepare(direntry, attrs);
 	if (rc < 0) {
 		free_xid(xid);
 		return rc;
