@@ -2407,6 +2407,8 @@ static void switch_names(struct dentry *dentry, struct dentry *target,
 			 */
 			unsigned int i;
 			BUILD_BUG_ON(!IS_ALIGNED(DNAME_INLINE_LEN, sizeof(long)));
+			kmemcheck_mark_initialized(dentry->d_iname, DNAME_INLINE_LEN);
+			kmemcheck_mark_initialized(target->d_iname, DNAME_INLINE_LEN);
 			if (!exchange) {
 				memcpy(dentry->d_iname, target->d_name.name,
 						target->d_name.len + 1);
@@ -2675,11 +2677,13 @@ struct dentry *d_splice_alias(struct inode *inode, struct dentry *dentry)
 			if (!IS_ROOT(new)) {
 				spin_unlock(&inode->i_lock);
 				dput(new);
+				iput(inode);
 				return ERR_PTR(-EIO);
 			}
 			if (d_ancestor(new, dentry)) {
 				spin_unlock(&inode->i_lock);
 				dput(new);
+				iput(inode);
 				return ERR_PTR(-EIO);
 			}
 			write_seqlock(&rename_lock);
@@ -2810,12 +2814,17 @@ static int prepend(char **buffer, int *buflen, const char *str, int namelen)
  * the beginning of the name. The sequence number check at the caller will
  * retry it again when a d_move() does happen. So any garbage in the buffer
  * due to mismatched pointer and length will be discarded.
+ *
+ * Data dependency barrier is needed to make sure that we see that terminating
+ * NUL.  Alpha strikes again, film at 11...
  */
 static int prepend_name(char **buffer, int *buflen, struct qstr *name)
 {
 	const char *dname = ACCESS_ONCE(name->name);
 	u32 dlen = ACCESS_ONCE(name->len);
 	char *p;
+
+	smp_read_barrier_depends();
 
 	*buflen -= dlen + 1;
 	if (*buflen < 0)
